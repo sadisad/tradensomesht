@@ -86,9 +86,14 @@ class LiveBot:
 
         # Paper-mode in-memory positions (we don't really place orders).
         # Persisted to JSON between restarts so SL/TP and bar counters survive.
+        # Filename embeds the symbol so multiple bots can run side-by-side
+        # without clobbering each other's state.
         self._paper_positions: Dict[int, Dict[str, Any]] = {}
         self._paper_next_ticket: int = 9_000_000_000
-        self._paper_state_path: Path = Path(self.journal_cfg["db_path"]).with_name("paper_positions.json")
+        _safe_symbol = "".join(c if c.isalnum() else "_" for c in self.symbol).lower()
+        self._paper_state_path: Path = Path(self.journal_cfg["db_path"]).with_name(
+            f"paper_positions_{_safe_symbol}.json"
+        )
         self._load_paper_state()
 
     # ------------------------------------------------------------------ lifecycle

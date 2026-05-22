@@ -10,6 +10,7 @@ env/
 data/*.db
 data/*.log
 data/*.csv
+data/*.json
 models/*.joblib
 
 # IDE
@@ -22,4 +23,5 @@ Thumbs.db
 
 # Local secrets
 config.local.yaml
+config.local.*.yaml
 .env
