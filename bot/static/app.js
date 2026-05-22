@@ -7,6 +7,8 @@
 
   let chart = null;
   let candleSeries = null;
+  let equityChart = null;
+  let equitySeries = null;
   let lastCandleTime = 0;
   let lastChartLoad = 0;
 
@@ -90,6 +92,56 @@
         }
       });
     } catch (_) { /* ignore transient errors */ }
+  }
+
+  // ----------------------------------------------------------------- equity curve
+  function ensureEquityChart() {
+    if (equityChart) return;
+    const el = document.getElementById("equity-chart");
+    equityChart = LightweightCharts.createChart(el, {
+      layout: { background: { color: "#161b22" }, textColor: "#e6edf3" },
+      grid: { vertLines: { color: "#2a313c" }, horzLines: { color: "#2a313c" } },
+      timeScale: { timeVisible: true, secondsVisible: false, borderColor: "#2a313c" },
+      rightPriceScale: { borderColor: "#2a313c" },
+      crosshair: { mode: 1 },
+      autoSize: true,
+    });
+    equitySeries = equityChart.addAreaSeries({
+      lineColor: "#3b82f6",
+      topColor: "rgba(59, 130, 246, 0.30)",
+      bottomColor: "rgba(59, 130, 246, 0.02)",
+      lineWidth: 2,
+    });
+  }
+
+  async function refreshEquityCurve() {
+    ensureEquityChart();
+    try {
+      const r = await getJSON("/api/equity_curve");
+      const points = (r.points || [])
+        .map((p) => {
+          const d = new Date(p.time);
+          if (isNaN(d.getTime())) return null;
+          return { time: Math.floor(d.getTime() / 1000), value: Number(p.cum_pnl) };
+        })
+        .filter(Boolean);
+      // lightweight-charts requires unique, ascending timestamps. Dedup by keeping the last.
+      const dedup = [];
+      const seen = new Map();
+      points.forEach((p) => seen.set(p.time, p.value));
+      Array.from(seen.entries())
+        .sort((a, b) => a[0] - b[0])
+        .forEach(([t, v]) => dedup.push({ time: t, value: v }));
+      equitySeries.setData(dedup);
+      const last = dedup.length ? dedup[dedup.length - 1].value : 0;
+      const first = dedup.length ? dedup[0].value : 0;
+      setText("equity-sub",
+        dedup.length
+          ? `${dedup.length} closed trades | last: ${fmtMoney(last, "")} | range: ${fmtMoney(first, "")} -> ${fmtMoney(last, "")}`
+          : "no closed trades yet");
+    } catch (e) {
+      setText("equity-sub", `equity error: ${e.message}`);
+    }
   }
 
   // ----------------------------------------------------------------- top bar / kpis
@@ -218,6 +270,7 @@
       refreshSignals(),
       refreshTrades(),
       refreshLastCandle(),
+      refreshEquityCurve(),
     ]);
     if (Date.now() - lastChartLoad > CHART_REFRESH_MS) {
       // Reload candles + markers periodically (cheap)

@@ -93,6 +93,11 @@ main {
   height: 460px;
 }
 
+.chart-card #equity-chart {
+  width: 100%;
+  height: 220px;
+}
+
 .grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
