@@ -1,14 +1,52 @@
+/* ----------------------------------------------------------------------------
+   Robot Trading dashboard - light professional theme.
+   Palette: FFF9D2 / FFEBCC / BFDDF0 / 8CC0EB plus semantic teal/coral for PnL.
+   Designed for long sessions: high contrast text, soft surfaces, clear semantics.
+---------------------------------------------------------------------------- */
+
 :root {
-  --bg: #0e1117;
-  --bg-2: #161b22;
-  --bg-3: #1f2630;
-  --line: #2a313c;
-  --text: #e6edf3;
-  --muted: #8b949e;
-  --green: #26a69a;
-  --red: #ef5350;
-  --amber: #f4b400;
-  --blue: #3b82f6;
+  /* Surfaces (warm cream/peach palette) */
+  --bg:        #FFF9D2;
+  --bg-card:   #FFEBCC;
+  --bg-hover:  #FFE2B8;
+  --bg-chart:  #FFF6E5;
+
+  /* Lines / borders / grid */
+  --line:      #BFDDF0;
+  --line-soft: rgba(140, 192, 235, 0.28);
+
+  /* Accents (cool blue palette) */
+  --accent:        #8CC0EB;
+  --accent-strong: #5FA3D6;
+  --accent-soft:   rgba(140, 192, 235, 0.22);
+
+  /* Text */
+  --text:       #1a2332;
+  --text-soft:  #4a5663;
+  --text-muted: #6b7884;
+
+  /* Semantic colors (added beyond the four-color palette so traders can
+     read PnL/side at a glance against a warm background). Hand-picked for
+     >= 4.5:1 contrast against --bg / --bg-card. */
+  --win:   #0d8a6e;
+  --loss:  #b8423a;
+  --warn:  #b07300;
+  --info:  #4a7fb5;
+
+  /* Pill background tints */
+  --win-tint:  rgba(13, 138, 110, 0.14);
+  --loss-tint: rgba(184, 66, 58, 0.14);
+  --warn-tint: rgba(176, 115, 0, 0.16);
+  --mute-tint: rgba(74, 86, 99, 0.10);
+
+  /* Shadows / elevation */
+  --shadow-sm: 0 1px 2px rgba(26, 35, 50, 0.06);
+  --shadow:    0 4px 14px rgba(26, 35, 50, 0.08);
+
+  /* Radii / spacing */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
 }
 
 * { box-sizing: border-box; }
@@ -18,85 +56,133 @@ html, body {
   padding: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+               "Helvetica Neue", Arial, sans-serif;
   font-size: 14px;
-  line-height: 1.45;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "ss01", "cv11";
 }
 
-a { color: var(--blue); }
+a { color: var(--accent-strong); text-decoration: none; }
+a:hover { color: var(--text); }
 
-h1 { font-size: 16px; margin: 0; font-weight: 600; }
-h2 { font-size: 13px; margin: 0; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+h1 { font-size: 17px; margin: 0; font-weight: 700; letter-spacing: -0.01em; }
+h2 {
+  font-size: 11px;
+  margin: 0;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
 
-.muted { color: var(--muted); font-size: 12px; }
+.muted { color: var(--text-muted); font-size: 12px; }
 
+/* ----------------------------------------------------------------- top bar */
 .topbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 20px;
-  background: var(--bg-2);
+  padding: 14px 24px;
+  background: var(--bg-card);
   border-bottom: 1px solid var(--line);
   position: sticky;
   top: 0;
   z-index: 10;
+  box-shadow: var(--shadow-sm);
 }
 
-.brand { display: flex; align-items: center; gap: 12px; }
+.brand { display: flex; align-items: center; gap: 14px; }
 .dot {
-  width: 10px; height: 10px; border-radius: 50%;
-  background: var(--muted);
-  box-shadow: 0 0 8px transparent;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  box-shadow: 0 0 0 4px transparent;
+  transition: box-shadow 200ms ease, background 200ms ease;
 }
-.dot.ok    { background: var(--green); box-shadow: 0 0 8px var(--green); }
-.dot.warn  { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
-.dot.error { background: var(--red);   box-shadow: 0 0 8px var(--red); }
+.dot.ok    { background: var(--win);  box-shadow: 0 0 0 4px var(--win-tint); }
+.dot.warn  { background: var(--warn); box-shadow: 0 0 0 4px var(--warn-tint); }
+.dot.error { background: var(--loss); box-shadow: 0 0 0 4px var(--loss-tint); }
 
-.kpis { display: flex; gap: 18px; }
-.kpi { display: flex; flex-direction: column; align-items: flex-end; }
-.kpi label { font-size: 11px; color: var(--muted); text-transform: uppercase; }
-.kpi span { font-size: 16px; font-weight: 600; }
+.kpis { display: flex; gap: 26px; }
+.kpi {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  min-width: 88px;
+}
+.kpi label {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-weight: 600;
+}
+.kpi span {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
 
+/* ----------------------------------------------------------------- stats row */
 .stats-row {
   display: grid;
   grid-template-columns: repeat(6, 1fr);
-  gap: 12px;
-  padding: 16px 20px 0;
+  gap: 14px;
+  padding: 18px 24px 0;
 }
 
 .card {
-  background: var(--bg-2);
+  background: var(--bg-card);
   border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 14px;
+  border-radius: var(--r-md);
+  padding: 16px 18px;
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow 150ms ease, transform 150ms ease;
 }
-.stat { display: flex; flex-direction: column; gap: 4px; }
-.stat label { font-size: 11px; color: var(--muted); text-transform: uppercase; }
-.stat strong { font-size: 18px; font-weight: 600; }
+.card:hover { box-shadow: var(--shadow); }
+
+.stat { display: flex; flex-direction: column; gap: 6px; }
+.stat label {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-weight: 600;
+}
+.stat strong {
+  font-size: 19px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
 
 .card-header {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line-soft);
 }
 
 main {
-  padding: 16px 20px 24px;
+  padding: 18px 24px 28px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 18px;
 }
 
-.chart-card #chart {
-  width: 100%;
-  height: 460px;
-}
-
-.chart-card #equity-chart {
-  width: 100%;
-  height: 220px;
-}
+/* ----------------------------------------------------------------- charts */
+.chart-card #chart       { width: 100%; height: 460px; border-radius: var(--r-sm); overflow: hidden; }
+.chart-card #equity-chart{ width: 100%; height: 220px; border-radius: var(--r-sm); overflow: hidden; }
 
 .grid {
   display: grid;
@@ -105,6 +191,7 @@ main {
 }
 .span-2 { grid-column: span 2; }
 
+/* ----------------------------------------------------------------- tables */
 table {
   width: 100%;
   border-collapse: collapse;
@@ -112,43 +199,80 @@ table {
 }
 th, td {
   text-align: left;
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--line);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line-soft);
   white-space: nowrap;
 }
 th {
-  font-size: 11px;
+  font-size: 10px;
   text-transform: uppercase;
-  color: var(--muted);
-  font-weight: 500;
+  color: var(--text-muted);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  background: transparent;
 }
-tbody tr:hover { background: var(--bg-3); }
+tbody tr { transition: background 100ms ease; }
+tbody tr:hover { background: var(--bg-hover); }
+td { color: var(--text); }
+td.num,
+.pnl-pos, .pnl-neg {
+  font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-feature-settings: "tnum";
+}
 
-.side-buy  { color: var(--green); font-weight: 600; }
-.side-sell { color: var(--red);   font-weight: 600; }
-.pnl-pos   { color: var(--green); }
-.pnl-neg   { color: var(--red); }
+/* ----------------------------------------------------------------- semantics */
+.side-buy  { color: var(--win);  font-weight: 700; }
+.side-sell { color: var(--loss); font-weight: 700; }
+.pnl-pos   { color: var(--win);  font-weight: 600; }
+.pnl-neg   { color: var(--loss); font-weight: 600; }
+
 .pill {
   display: inline-block;
-  padding: 1px 6px;
+  padding: 2px 9px;
   border-radius: 999px;
   font-size: 11px;
   font-weight: 600;
+  letter-spacing: 0.02em;
+  border: 1px solid transparent;
 }
-.pill.acted     { background: rgba(38,166,154,0.18); color: var(--green); }
-.pill.skipped   { background: rgba(139,148,158,0.18); color: var(--muted); }
-.pill.win       { background: rgba(38,166,154,0.18); color: var(--green); }
-.pill.loss      { background: rgba(239,83,80,0.18);  color: var(--red); }
+.pill.acted   { background: var(--win-tint);  color: var(--win);  border-color: rgba(13,138,110,0.30); }
+.pill.skipped { background: var(--mute-tint); color: var(--text-soft); }
+.pill.win     { background: var(--win-tint);  color: var(--win);  border-color: rgba(13,138,110,0.30); }
+.pill.loss    { background: var(--loss-tint); color: var(--loss); border-color: rgba(184,66,58,0.30); }
 
+/* Mode pill in the top bar (paper vs demo) */
+.kpi.mode span {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  border: 1px solid var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+/* ----------------------------------------------------------------- footer */
 footer {
-  padding: 8px 20px 20px;
+  padding: 12px 24px 18px;
   text-align: right;
   border-top: 1px solid var(--line);
-  background: var(--bg-2);
+  background: var(--bg-card);
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
+/* ----------------------------------------------------------------- responsive */
 @media (max-width: 1100px) {
   .stats-row { grid-template-columns: repeat(3, 1fr); }
   .grid { grid-template-columns: 1fr; }
   .span-2 { grid-column: span 1; }
+  .kpis { gap: 16px; }
+}
+
+@media (max-width: 700px) {
+  .stats-row { grid-template-columns: repeat(2, 1fr); }
+  .topbar { flex-direction: column; gap: 12px; align-items: flex-start; }
+  .kpis { flex-wrap: wrap; }
 }

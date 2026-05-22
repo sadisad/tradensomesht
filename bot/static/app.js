@@ -12,6 +12,19 @@
   let lastCandleTime = 0;
   let lastChartLoad = 0;
 
+  // ---- Theme: pull live values from CSS so charts match the rest of the UI.
+  // Reading them once at boot is fine because the theme is static per page load.
+  const css = getComputedStyle(document.documentElement);
+  const theme = {
+    bg:      (css.getPropertyValue("--bg-chart")    || "#FFF6E5").trim(),
+    text:    (css.getPropertyValue("--text")        || "#1a2332").trim(),
+    grid:    (css.getPropertyValue("--line-soft")   || "rgba(140,192,235,0.28)").trim(),
+    border:  (css.getPropertyValue("--line")        || "#BFDDF0").trim(),
+    win:     (css.getPropertyValue("--win")         || "#0d8a6e").trim(),
+    loss:    (css.getPropertyValue("--loss")        || "#b8423a").trim(),
+    accent:  (css.getPropertyValue("--accent-strong") || "#5FA3D6").trim(),
+  };
+
   // ----------------------------------------------------------------- helpers
   function fmtNum(v, digits) {
     if (v === null || v === undefined || isNaN(v)) return "--";
@@ -44,17 +57,17 @@
     if (chart) return;
     const el = document.getElementById("chart");
     chart = LightweightCharts.createChart(el, {
-      layout: { background: { color: "#161b22" }, textColor: "#e6edf3" },
-      grid: { vertLines: { color: "#2a313c" }, horzLines: { color: "#2a313c" } },
-      timeScale: { timeVisible: true, secondsVisible: false, borderColor: "#2a313c" },
-      rightPriceScale: { borderColor: "#2a313c" },
+      layout: { background: { color: theme.bg }, textColor: theme.text },
+      grid: { vertLines: { color: theme.grid }, horzLines: { color: theme.grid } },
+      timeScale: { timeVisible: true, secondsVisible: false, borderColor: theme.border },
+      rightPriceScale: { borderColor: theme.border },
       crosshair: { mode: 1 },
       autoSize: true,
     });
     candleSeries = chart.addCandlestickSeries({
-      upColor: "#26a69a", downColor: "#ef5350",
-      borderUpColor: "#26a69a", borderDownColor: "#ef5350",
-      wickUpColor: "#26a69a", wickDownColor: "#ef5350",
+      upColor: theme.win, downColor: theme.loss,
+      borderUpColor: theme.win, borderDownColor: theme.loss,
+      wickUpColor: theme.win, wickDownColor: theme.loss,
     });
     window.addEventListener("resize", () => chart && chart.applyOptions({}));
   }
@@ -99,17 +112,17 @@
     if (equityChart) return;
     const el = document.getElementById("equity-chart");
     equityChart = LightweightCharts.createChart(el, {
-      layout: { background: { color: "#161b22" }, textColor: "#e6edf3" },
-      grid: { vertLines: { color: "#2a313c" }, horzLines: { color: "#2a313c" } },
-      timeScale: { timeVisible: true, secondsVisible: false, borderColor: "#2a313c" },
-      rightPriceScale: { borderColor: "#2a313c" },
+      layout: { background: { color: theme.bg }, textColor: theme.text },
+      grid: { vertLines: { color: theme.grid }, horzLines: { color: theme.grid } },
+      timeScale: { timeVisible: true, secondsVisible: false, borderColor: theme.border },
+      rightPriceScale: { borderColor: theme.border },
       crosshair: { mode: 1 },
       autoSize: true,
     });
     equitySeries = equityChart.addAreaSeries({
-      lineColor: "#3b82f6",
-      topColor: "rgba(59, 130, 246, 0.30)",
-      bottomColor: "rgba(59, 130, 246, 0.02)",
+      lineColor: theme.accent,
+      topColor: "rgba(95, 163, 214, 0.30)",
+      bottomColor: "rgba(95, 163, 214, 0.02)",
       lineWidth: 2,
     });
   }
