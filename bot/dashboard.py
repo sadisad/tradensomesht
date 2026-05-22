@@ -85,6 +85,34 @@ def _row_to_dict(r: sqlite3.Row) -> Dict[str, Any]:
     return {k: r[k] for k in r.keys()}
 
 
+def _available_symbols(default: str) -> List[str]:
+    """Symbols this dashboard knows about: union of journal-observed symbols + config default."""
+    syms = {default} if default else set()
+    try:
+        with _db() as c:
+            for r in c.execute("SELECT DISTINCT symbol FROM trades WHERE symbol IS NOT NULL"):
+                syms.add(str(r["symbol"]))
+            for r in c.execute("SELECT DISTINCT symbol FROM signals WHERE symbol IS NOT NULL"):
+                syms.add(str(r["symbol"]))
+    except Exception as e:  # noqa: BLE001
+        log.debug("symbol discovery failed (journal not ready?): %s", e)
+    return sorted(s for s in syms if s)
+
+
+def _resolve_symbol(requested: Optional[str], default: str) -> str:
+    """Sanitize a user-supplied symbol. We accept anything alphanumeric + a few separators
+    so brokers' suffixed names (XAUUSD.s, EURUSD-pro) work; reject anything else to avoid
+    feeding garbage to MT5 or SQL."""
+    if not requested:
+        return default
+    cleaned = requested.strip()
+    if not cleaned or len(cleaned) > 32:
+        return default
+    if not all(ch.isalnum() or ch in "._-" for ch in cleaned):
+        return default
+    return cleaned
+
+
 # ---------------------------------------------------------------------- app factory
 def create_app(cfg: Dict[str, Any]) -> FastAPI:
     STATE.cfg = cfg
@@ -103,14 +131,21 @@ def create_app(cfg: Dict[str, Any]) -> FastAPI:
             raise HTTPException(500, "index.html not found")
         return FileResponse(idx)
 
+    @app.get("/api/symbols")
+    def api_symbols():
+        """List of symbols the dashboard can switch between (journal + config default)."""
+        default = cfg["trading"]["symbol"]
+        return {"default": default, "symbols": _available_symbols(default)}
+
     @app.get("/api/status")
-    def api_status():
+    def api_status(symbol: Optional[str] = None):
         client = _try_mt5()
-        symbol = cfg["trading"]["symbol"]
+        default_symbol = cfg["trading"]["symbol"]
+        sym = _resolve_symbol(symbol, default_symbol)
         timeframe = cfg["trading"]["timeframe"]
         mode = cfg["trading"].get("mode", "paper")
         out: Dict[str, Any] = {
-            "symbol": symbol,
+            "symbol": sym,
             "timeframe": timeframe,
             "mode": mode,
             "magic": cfg["broker"].get("magic"),
@@ -127,7 +162,7 @@ def create_app(cfg: Dict[str, Any]) -> FastAPI:
         try:
             import MetaTrader5 as mt5  # type: ignore
             info = mt5.account_info()
-            tick = mt5.symbol_info_tick(symbol)
+            tick = mt5.symbol_info_tick(sym)
             out["mt5_connected"] = True
             if info is not None:
                 out["balance"] = float(info.balance)
@@ -146,14 +181,15 @@ def create_app(cfg: Dict[str, Any]) -> FastAPI:
     def api_candles(
         bars: int = Query(500, ge=1, le=5000),
         timeframe: Optional[str] = None,
+        symbol: Optional[str] = None,
     ):
         client = _try_mt5()
         if client is None:
             return JSONResponse({"error": "mt5_unavailable", "candles": []}, status_code=200)
-        symbol = cfg["trading"]["symbol"]
+        sym = _resolve_symbol(symbol, cfg["trading"]["symbol"])
         tf = timeframe or cfg["trading"]["timeframe"]
         try:
-            df = client.get_rates(symbol, tf, bars)
+            df = client.get_rates(sym, tf, bars)
         except Exception as e:  # noqa: BLE001
             return JSONResponse({"error": str(e), "candles": []}, status_code=200)
         candles = [
@@ -167,18 +203,19 @@ def create_app(cfg: Dict[str, Any]) -> FastAPI:
             }
             for idx, row in df.iterrows()
         ]
-        return {"symbol": symbol, "timeframe": tf, "candles": candles}
+        return {"symbol": sym, "timeframe": tf, "candles": candles}
 
     @app.get("/api/positions")
-    def api_positions():
+    def api_positions(symbol: Optional[str] = None):
         """Open positions: from MT5 in demo mode, from journal in paper mode."""
         mode = cfg["trading"].get("mode", "paper")
+        sym = _resolve_symbol(symbol, cfg["trading"]["symbol"])
         if mode == "demo":
             client = _try_mt5()
             if client is None:
                 return {"mode": mode, "positions": []}
             try:
-                pos = client.open_positions(cfg["trading"]["symbol"])
+                pos = client.open_positions(sym)
             except Exception as e:  # noqa: BLE001
                 return {"mode": mode, "positions": [], "error": str(e)}
             return {
@@ -197,57 +234,82 @@ def create_app(cfg: Dict[str, Any]) -> FastAPI:
                     for p in pos
                 ],
             }
-        # paper mode: read open rows from the journal
+        # paper mode: read open rows from the journal, filtered by symbol
         with _db() as c:
             rows = c.execute(
                 "SELECT ticket, side, volume, entry_price AS entry, sl, tp, "
                 "       opened_at, atr "
-                "  FROM trades WHERE closed_at IS NULL ORDER BY opened_at DESC"
+                "  FROM trades WHERE closed_at IS NULL AND symbol = ? "
+                " ORDER BY opened_at DESC",
+                (sym,),
             ).fetchall()
         return {"mode": mode, "positions": [_row_to_dict(r) for r in rows]}
 
     @app.get("/api/trades")
-    def api_trades(limit: int = Query(50, ge=1, le=500)):
+    def api_trades(
+        limit: int = Query(50, ge=1, le=500),
+        symbol: Optional[str] = None,
+    ):
+        sym = _resolve_symbol(symbol, cfg["trading"]["symbol"])
         with _db() as c:
             rows = c.execute(
                 "SELECT ticket, symbol, side, volume, entry_price, sl, tp, atr, "
                 "       risk_money, risk_pct, reason, opened_at, closed_at, "
                 "       close_price, close_reason, pnl, outcome "
-                "  FROM trades WHERE closed_at IS NOT NULL "
+                "  FROM trades WHERE closed_at IS NOT NULL AND symbol = ? "
                 " ORDER BY closed_at DESC LIMIT ?",
-                (int(limit),),
+                (sym, int(limit)),
             ).fetchall()
         return {"trades": [_row_to_dict(r) for r in rows]}
 
     @app.get("/api/signals")
-    def api_signals(limit: int = Query(50, ge=1, le=500)):
+    def api_signals(
+        limit: int = Query(50, ge=1, le=500),
+        symbol: Optional[str] = None,
+    ):
+        sym = _resolve_symbol(symbol, cfg["trading"]["symbol"])
         with _db() as c:
             rows = c.execute(
                 "SELECT id, bar_time, symbol, side, reason, entry_ref, atr, "
                 "       proba, acted, skip_reason, created_at "
-                "  FROM signals ORDER BY id DESC LIMIT ?",
-                (int(limit),),
+                "  FROM signals WHERE symbol = ? "
+                " ORDER BY id DESC LIMIT ?",
+                (sym, int(limit)),
             ).fetchall()
         return {"signals": [_row_to_dict(r) for r in rows]}
 
     @app.get("/api/equity_curve")
-    def api_equity_curve():
-        """Cumulative pnl over closed trades (UTC). Bot's own pnl, not account."""
+    def api_equity_curve(symbol: Optional[str] = None):
+        """Cumulative pnl over closed trades (UTC). If symbol is given, scope to that pair;
+        otherwise show portfolio-wide cumulative pnl across all symbols."""
+        sym = _resolve_symbol(symbol, "") or None
         with _db() as c:
-            rows = c.execute(
-                "SELECT closed_at, pnl FROM trades "
-                " WHERE closed_at IS NOT NULL "
-                " ORDER BY closed_at"
-            ).fetchall()
+            if sym:
+                rows = c.execute(
+                    "SELECT closed_at, pnl FROM trades "
+                    " WHERE closed_at IS NOT NULL AND symbol = ? "
+                    " ORDER BY closed_at",
+                    (sym,),
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT closed_at, pnl FROM trades "
+                    " WHERE closed_at IS NOT NULL "
+                    " ORDER BY closed_at"
+                ).fetchall()
         cum = 0.0
         points = []
         for r in rows:
             cum += float(r["pnl"] or 0.0)
             points.append({"time": r["closed_at"], "cum_pnl": cum})
-        return {"points": points}
+        return {"symbol": sym, "points": points}
 
     @app.get("/api/stats")
-    def api_stats():
+    def api_stats(symbol: Optional[str] = None):
+        """Per-symbol stats when ?symbol= is given, otherwise portfolio-wide."""
+        sym = _resolve_symbol(symbol, "") or None
+        where_sym = " AND symbol = ?" if sym else ""
+        params = (sym,) if sym else ()
         with _db() as c:
             row = c.execute(
                 "SELECT COUNT(*)               AS n,"
@@ -255,26 +317,30 @@ def create_app(cfg: Dict[str, Any]) -> FastAPI:
                 "       SUM(CASE WHEN outcome=0 THEN 1 ELSE 0 END) AS losses,"
                 "       COALESCE(SUM(pnl), 0)  AS total_pnl,"
                 "       COALESCE(AVG(pnl), 0)  AS avg_pnl"
-                "  FROM trades WHERE outcome IS NOT NULL"
+                "  FROM trades WHERE outcome IS NOT NULL" + where_sym,
+                params,
             ).fetchone()
             today_iso = (datetime.now(tz=timezone.utc) - timedelta(hours=24)).isoformat()
             today = c.execute(
                 "SELECT COUNT(*) AS n, COALESCE(SUM(pnl),0) AS pnl "
-                "  FROM trades WHERE closed_at IS NOT NULL AND closed_at > ?",
-                (today_iso,),
+                "  FROM trades WHERE closed_at IS NOT NULL AND closed_at > ?" + where_sym,
+                (today_iso, *params),
             ).fetchone()
             sig = c.execute(
                 "SELECT COUNT(*) AS n,"
                 "       SUM(CASE WHEN acted=1 THEN 1 ELSE 0 END) AS acted "
-                "  FROM signals"
+                "  FROM signals" + (" WHERE symbol = ?" if sym else ""),
+                params,
             ).fetchone()
             last_loss = c.execute(
-                "SELECT closed_at FROM trades WHERE outcome=0 "
-                " ORDER BY closed_at DESC LIMIT 1"
+                "SELECT closed_at FROM trades WHERE outcome=0" + where_sym +
+                " ORDER BY closed_at DESC LIMIT 1",
+                params,
             ).fetchone()
         n = int(row["n"] or 0)
         wins = int(row["wins"] or 0)
         return {
+            "symbol": sym,
             "closed_trades": n,
             "wins": wins,
             "losses": int(row["losses"] or 0),
@@ -289,14 +355,18 @@ def create_app(cfg: Dict[str, Any]) -> FastAPI:
         }
 
     @app.get("/api/chart_markers")
-    def api_chart_markers(limit: int = Query(100, ge=1, le=500)):
-        """Trade entries/exits as chart markers (most recent first)."""
+    def api_chart_markers(
+        limit: int = Query(100, ge=1, le=500),
+        symbol: Optional[str] = None,
+    ):
+        """Trade entries/exits as chart markers (most recent first), filtered by symbol."""
+        sym = _resolve_symbol(symbol, cfg["trading"]["symbol"])
         with _db() as c:
             rows = c.execute(
                 "SELECT ticket, side, entry_price, opened_at, "
                 "       close_price, closed_at, close_reason, outcome, reason "
-                "  FROM trades ORDER BY opened_at DESC LIMIT ?",
-                (int(limit),),
+                "  FROM trades WHERE symbol = ? ORDER BY opened_at DESC LIMIT ?",
+                (sym, int(limit)),
             ).fetchall()
         markers: List[Dict[str, Any]] = []
         for r in rows:
@@ -307,7 +377,7 @@ def create_app(cfg: Dict[str, Any]) -> FastAPI:
             markers.append({
                 "time": t_in,
                 "position": "belowBar" if r["side"] == "buy" else "aboveBar",
-                "color": "#26a69a" if r["side"] == "buy" else "#ef5350",
+                "color": "#0d8a6e" if r["side"] == "buy" else "#b8423a",
                 "shape": "arrowUp" if r["side"] == "buy" else "arrowDown",
                 "text": f"{r['side']} #{r['ticket']}",
             })
@@ -316,7 +386,7 @@ def create_app(cfg: Dict[str, Any]) -> FastAPI:
                     t_out = int(datetime.fromisoformat(r["closed_at"]).timestamp())
                 except Exception:  # noqa: BLE001
                     continue
-                outcome_color = "#26a69a" if r["outcome"] == 1 else "#ef5350"
+                outcome_color = "#0d8a6e" if r["outcome"] == 1 else "#b8423a"
                 markers.append({
                     "time": t_out,
                     "position": "aboveBar" if r["side"] == "buy" else "belowBar",

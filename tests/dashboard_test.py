@@ -72,6 +72,33 @@ def seed_journal(db_path: Path) -> None:
         features=feats, opened_at=open_t, magic=42,
     ))
 
+    # Add a second-symbol slice so ?symbol= filtering can be verified
+    for k in range(10):
+        opened = base_time + timedelta(hours=k * 2 + 1)
+        closed = opened + timedelta(minutes=45)
+        side = "buy" if k % 2 == 0 else "sell"
+        # All wins for EURUSD: lets the test distinguish which symbol's stats we got
+        ticket = 7_000_000 + k
+        feats = {c: 0.0 for c in FEATURE_COLUMNS}
+        feats["__side_buy"] = 1.0 if side == "buy" else 0.0
+        j.record_open(OpenTrade(
+            ticket=ticket, symbol="EURUSD", side=side,
+            volume=0.05, entry_price=1.085 + k * 0.0005,
+            sl=1.082, tp=1.090, atr=0.001,
+            risk_money=10.0, risk_pct=0.25, reason="seed_eur",
+            features=feats, opened_at=opened, magic=43,
+        ))
+        j.record_close(
+            ticket=ticket, closed_at=closed,
+            close_price=1.090, close_reason="tp",
+            pnl=4.0,
+        )
+        j.record_signal(
+            bar_time=opened, symbol="EURUSD", side=side,
+            reason="bull_cross", entry_ref=1.085, atr=0.001, proba=0.7,
+            acted=True, skip_reason=None, features=feats,
+        )
+
 
 def fetch(host: str, port: int, path: str) -> dict:
     url = f"http://{host}:{port}{path}"
@@ -114,22 +141,54 @@ def main() -> int:
             "/api/status", "/api/stats", "/api/positions",
             "/api/trades?limit=10", "/api/signals?limit=10",
             "/api/equity_curve", "/api/chart_markers?limit=20",
+            "/api/symbols",
         ]
         for ep in endpoints:
             data = fetch("127.0.0.1", 8766, ep)
             print(f"[OK] {ep:40s} keys={list(data.keys())[:6]}")
 
-        # Spot checks
+        # Spot checks: with multi-symbol journal seeded (30 XAUUSD + 10 EURUSD),
+        # endpoint defaults split:
+        #   - stats / equity_curve  -> portfolio-wide (no symbol filter by default)
+        #   - trades / signals / positions / candles / status / chart_markers
+        #     -> default to the dashboard's configured symbol (XAUUSD here)
+        # The JS always passes ?symbol= so end-user behaviour is uniform; defaults
+        # only affect ad-hoc curl/debug requests.
         stats = fetch("127.0.0.1", 8766, "/api/stats")
-        assert stats["closed_trades"] == 30, stats
+        assert stats["closed_trades"] == 40, stats           # portfolio-wide
+        assert stats["symbol"] is None, stats
         positions = fetch("127.0.0.1", 8766, "/api/positions")
-        assert len(positions["positions"]) == 1, positions
-        trades = fetch("127.0.0.1", 8766, "/api/trades?limit=5")
-        assert len(trades["trades"]) == 5, trades
+        assert len(positions["positions"]) == 1, positions   # config-symbol-scoped
+        trades = fetch("127.0.0.1", 8766, "/api/trades?limit=100")
+        assert len(trades["trades"]) == 30, trades           # XAUUSD default
+        assert all(t["symbol"] == "XAUUSD" for t in trades["trades"]), trades
         signals = fetch("127.0.0.1", 8766, "/api/signals?limit=5")
         assert len(signals["signals"]) == 5, signals
+        assert all(s["symbol"] == "XAUUSD" for s in signals["signals"]), signals
         markers = fetch("127.0.0.1", 8766, "/api/chart_markers?limit=10")
         assert len(markers["markers"]) > 0, markers
+
+        # Multi-symbol filtering
+        symbols = fetch("127.0.0.1", 8766, "/api/symbols")
+        assert "XAUUSD" in symbols["symbols"] and "EURUSD" in symbols["symbols"], symbols
+        print(f"[OK] /api/symbols                              symbols={symbols['symbols']}")
+
+        eur_stats = fetch("127.0.0.1", 8766, "/api/stats?symbol=EURUSD")
+        assert eur_stats["closed_trades"] == 10, eur_stats
+        assert eur_stats["wins"] == 10, eur_stats     # all EURUSD seeds were wins
+        assert eur_stats["win_rate"] == 1.0, eur_stats
+
+        eur_trades = fetch("127.0.0.1", 8766, "/api/trades?symbol=EURUSD&limit=20")
+        assert all(t["symbol"] == "EURUSD" for t in eur_trades["trades"]), eur_trades
+        assert len(eur_trades["trades"]) == 10, eur_trades
+
+        eur_signals = fetch("127.0.0.1", 8766, "/api/signals?symbol=EURUSD&limit=20")
+        assert all(s["symbol"] == "EURUSD" for s in eur_signals["signals"]), eur_signals
+
+        eur_eq = fetch("127.0.0.1", 8766, "/api/equity_curve?symbol=EURUSD")
+        assert len(eur_eq["points"]) == 10, eur_eq
+        assert abs(eur_eq["points"][-1]["cum_pnl"] - 40.0) < 1e-6, eur_eq  # 10 trades * $4
+        print("[OK] symbol filter scoped EURUSD stats/trades/signals/equity correctly")
 
         # Verify the static index loads
         with urllib.request.urlopen("http://127.0.0.1:8766/", timeout=5) as r:

@@ -12,6 +12,13 @@
   let lastCandleTime = 0;
   let lastChartLoad = 0;
 
+  // Currently-selected symbol. Initialised from localStorage on boot, then
+  // overwritten once /api/symbols replies with the canonical list.
+  let currentSymbol = (typeof localStorage !== "undefined"
+    ? localStorage.getItem("rt:symbol")
+    : null) || "";
+  let knownSymbols = [];
+
   // ---- Theme: pull live values from CSS so charts match the rest of the UI.
   // Reading them once at boot is fine because the theme is static per page load.
   const css = getComputedStyle(document.documentElement);
@@ -52,6 +59,13 @@
   }
   function setText(id, txt) { const el = document.getElementById(id); if (el) el.textContent = txt; }
 
+  /** Append the currently-selected symbol as a query param to ``url``. */
+  function withSymbol(url) {
+    if (!currentSymbol) return url;
+    const sep = url.includes("?") ? "&" : "?";
+    return `${url}${sep}symbol=${encodeURIComponent(currentSymbol)}`;
+  }
+
   // ----------------------------------------------------------------- chart
   function ensureChart() {
     if (chart) return;
@@ -75,7 +89,7 @@
   async function loadCandlesFull() {
     ensureChart();
     try {
-      const data = await getJSON("/api/candles?bars=500");
+      const data = await getJSON(withSymbol("/api/candles?bars=500"));
       if (data.error) {
         setText("chart-sub", `chart unavailable: ${data.error}`);
         return;
@@ -85,7 +99,7 @@
       setText("chart-title", `${data.symbol} (${data.timeframe})`);
       setText("chart-sub", `${data.candles.length} bars`);
       // Markers
-      const m = await getJSON("/api/chart_markers?limit=200");
+      const m = await getJSON(withSymbol("/api/chart_markers?limit=200"));
       if (m.markers) candleSeries.setMarkers(m.markers);
       lastChartLoad = Date.now();
     } catch (e) {
@@ -96,7 +110,7 @@
   async function refreshLastCandle() {
     if (!candleSeries) return;
     try {
-      const data = await getJSON("/api/candles?bars=2");
+      const data = await getJSON(withSymbol("/api/candles?bars=2"));
       if (!data.candles || !data.candles.length) return;
       data.candles.forEach((c) => {
         if (c.time >= lastCandleTime) {
@@ -130,7 +144,7 @@
   async function refreshEquityCurve() {
     ensureEquityChart();
     try {
-      const r = await getJSON("/api/equity_curve");
+      const r = await getJSON(withSymbol("/api/equity_curve"));
       const points = (r.points || [])
         .map((p) => {
           const d = new Date(p.time);
@@ -160,7 +174,7 @@
   // ----------------------------------------------------------------- top bar / kpis
   async function refreshStatus() {
     try {
-      const s = await getJSON("/api/status");
+      const s = await getJSON(withSymbol("/api/status"));
       const dot = document.getElementById("conn-dot");
       if (s.mt5_connected) {
         dot.className = "dot ok";
@@ -183,7 +197,7 @@
 
   async function refreshStats() {
     try {
-      const s = await getJSON("/api/stats");
+      const s = await getJSON(withSymbol("/api/stats"));
       setText("s-closed", String(s.closed_trades));
       setText("s-wr", s.closed_trades ? (s.win_rate * 100).toFixed(1) + "%" : "--");
       const pnlEl = document.getElementById("s-pnl");
@@ -200,7 +214,7 @@
   // ----------------------------------------------------------------- tables
   async function refreshPositions() {
     try {
-      const r = await getJSON("/api/positions");
+      const r = await getJSON(withSymbol("/api/positions"));
       const tbody = document.querySelector("#positions-table tbody");
       const empty = document.getElementById("positions-empty");
       tbody.innerHTML = "";
@@ -228,7 +242,7 @@
 
   async function refreshSignals() {
     try {
-      const r = await getJSON("/api/signals?limit=20");
+      const r = await getJSON(withSymbol("/api/signals?limit=20"));
       const tbody = document.querySelector("#signals-table tbody");
       tbody.innerHTML = "";
       r.signals.forEach((s) => {
@@ -251,7 +265,7 @@
 
   async function refreshTrades() {
     try {
-      const r = await getJSON("/api/trades?limit=30");
+      const r = await getJSON(withSymbol("/api/trades?limit=30"));
       const tbody = document.querySelector("#trades-table tbody");
       tbody.innerHTML = "";
       r.trades.forEach((t) => {
@@ -274,6 +288,48 @@
     } catch (_) {}
   }
 
+  // ----------------------------------------------------------------- symbol picker
+  async function initSymbolPicker() {
+    const sel = document.getElementById("symbol-select");
+    if (!sel) return;
+    try {
+      const r = await getJSON("/api/symbols");
+      knownSymbols = r.symbols || [];
+      // If localStorage had a stale symbol the bot no longer reports, fall back
+      // to the dashboard's configured default.
+      if (!currentSymbol || !knownSymbols.includes(currentSymbol)) {
+        currentSymbol = r.default || (knownSymbols[0] || "");
+      }
+      sel.innerHTML = "";
+      knownSymbols.forEach((s) => {
+        const opt = document.createElement("option");
+        opt.value = s;
+        opt.textContent = s;
+        if (s === currentSymbol) opt.selected = true;
+        sel.appendChild(opt);
+      });
+      sel.addEventListener("change", () => {
+        currentSymbol = sel.value;
+        try { localStorage.setItem("rt:symbol", currentSymbol); } catch (_) {}
+        // Force a fresh chart on symbol switch: dispose the old series so
+        // setData below replays the candle layout cleanly.
+        if (chart && candleSeries) {
+          chart.removeSeries(candleSeries);
+          candleSeries = chart.addCandlestickSeries({
+            upColor: theme.win, downColor: theme.loss,
+            borderUpColor: theme.win, borderDownColor: theme.loss,
+            wickUpColor: theme.win, wickDownColor: theme.loss,
+          });
+        }
+        lastCandleTime = 0;
+        loadCandlesFull();
+        tick();
+      });
+    } catch (e) {
+      console.warn("symbol picker init failed:", e);
+    }
+  }
+
   // ----------------------------------------------------------------- main loop
   async function tick() {
     await Promise.all([
@@ -292,8 +348,9 @@
     setText("last-update", new Date().toISOString().replace("T", " ").slice(11, 19) + "Z");
   }
 
-  document.addEventListener("DOMContentLoaded", () => {
+  document.addEventListener("DOMContentLoaded", async () => {
     setText("refresh-secs", String(REFRESH_MS / 1000));
+    await initSymbolPicker();
     loadCandlesFull();
     tick();
     setInterval(tick, REFRESH_MS);
