@@ -1,0 +1,8 @@
+MetaTrader5==5.0.45
+pandas==2.2.2
+numpy==1.26.4
+scikit-learn==1.5.0
+joblib==1.4.2
+PyYAML==6.0.1
+python-dateutil==2.9.0.post0
+matplotlib==3.9.0

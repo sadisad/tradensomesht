@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# Data & models (often large or sensitive)
+data/*.db
+data/*.log
+data/*.csv
+models/*.joblib
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Local secrets
+config.local.yaml
+.env

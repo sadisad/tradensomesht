@@ -1,0 +1,58 @@
+# Robot Trading config
+# Edit this file before running. Keep secrets out of git.
+
+broker:
+  # MT5 terminal credentials. Use a DEMO account first.
+  login: 0                  # your MT5 demo account number (int)
+  password: ""              # your MT5 demo password
+  server: ""                # broker server name, e.g. "ICMarketsSC-Demo"
+  path: ""                  # optional: full path to terminal64.exe; leave "" for default
+  magic: 532001             # unique magic number used to tag this bot's orders
+
+trading:
+  symbol: "XAUUSD"          # primary instrument
+  timeframe: "M5"           # M1, M5, M15, M30, H1, H4, D1
+  history_bars: 1500        # bars pulled per cycle for indicators / features
+  loop_seconds: 15          # how often the live loop wakes up
+  mode: "paper"             # "paper" = log signals only, no real orders. "demo" = place orders on demo account.
+  max_open_positions: 1     # per symbol, this bot's positions only
+  trading_hours_utc:        # only trade inside this UTC window. Set both to null to disable.
+    start: "00:00"
+    end:   "23:59"
+  cooldown_minutes_after_loss: 30   # pause new entries this long after a losing trade
+
+risk:
+  risk_per_trade_pct: 0.5   # % of equity risked per trade (before dynamic scaling)
+  atr_period: 14
+  atr_sl_mult: 1.5          # stop = entry -/+ atr * mult
+  atr_tp_mult: 2.5          # take-profit = entry +/- atr * mult (R:R ~1.66)
+  min_stop_points: 50       # safety floor in points
+  max_lot: 1.0
+  min_lot: 0.01
+  daily_max_loss_pct: 3.0   # halt trading for the rest of the UTC day if equity drops this much
+
+strategy:
+  ema_fast: 20
+  ema_slow: 50
+  ema_trend: 200
+  rsi_period: 14
+  rsi_long_min: 50          # long only if RSI > this
+  rsi_long_max: 70          # avoid chasing overbought
+  rsi_short_min: 30
+  rsi_short_max: 50
+
+ml:
+  enabled: true
+  model_path: "models/ml_filter.joblib"
+  min_train_samples: 100
+  min_proba_to_trade: 0.55  # ignore signals the model thinks are <55% likely to win
+  retrain_every_n_trades: 25
+  feature_lookback: 50      # bars of context fed into feature engineering
+
+journal:
+  db_path: "data/journal.db"
+  csv_export_path: "data/trades.csv"
+
+logging:
+  level: "INFO"
+  file: "data/bot.log"
