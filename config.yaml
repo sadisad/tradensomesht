@@ -30,6 +30,28 @@ risk:
   max_lot: 1.0
   min_lot: 0.01
   daily_max_loss_pct: 3.0   # halt trading for the rest of the UTC day if equity drops this much
+  weekly_max_loss_pct: 6.0  # halt for the rest of the ISO week if equity drops this much (0 to disable)
+
+  # ---- Dynamic risk scaling -------------------------------------------------
+  # "linear" = win-rate blended around 1.0x; "kelly" = fractional-Kelly multiplier.
+  scaling_mode: "linear"
+  scaling_min_samples: 10   # don't scale until we have this many recent trades of the same side
+  scaling_floor: 0.5        # minimum multiplier on base risk_per_trade_pct
+  scaling_ceiling: 1.5      # maximum multiplier
+  kelly_fraction: 0.25      # only used when scaling_mode == "kelly" (1.0 = full Kelly, 0.25 = quarter)
+
+  # ---- Volatility regime gate ----------------------------------------------
+  # ATR-as-percent-of-price band. Outside the band the bot skips signals.
+  # 0 disables either side. Tune per symbol after observing typical M5 ATR%:
+  #   - GBPUSD M5: typically 0.02% - 0.06%; floor 0.01, ceiling 0.20 is sensible
+  #   - XAUUSD M5: typically 0.05% - 0.20%; floor 0.03, ceiling 0.50
+  regime_atr_pct_min: 0.0
+  regime_atr_pct_max: 0.0
+
+  # ---- Spread filter --------------------------------------------------------
+  # Reject signals when current spread is too wide. Either rule firing blocks.
+  max_spread_points: 0      # absolute cap in MT5 points; 0 disables
+  max_spread_atr_ratio: 0.0 # spread / ATR ratio cap; 0 disables. 0.15 = 15% of ATR.
 
 strategy:
   ema_fast: 20
@@ -40,6 +62,24 @@ strategy:
   rsi_long_max: 70          # avoid chasing overbought
   rsi_short_min: 30
   rsi_short_max: 50
+
+  # ---- Multi-timeframe trend filter ----------------------------------------
+  # When enabled, longs only fire if the higher-timeframe close is above its EMA
+  # (and inverse for shorts). Drops a lot of counter-trend signals.
+  mtf_enabled: false
+  mtf_timeframe: "H1"       # M15, M30, H1, H4, D1
+  mtf_ema_period: 50
+  mtf_bars: 400             # bars to pull from MT5 for the HTF check
+
+trade_management:
+  # In-flight position management. All thresholds are in R-multiples (multiples
+  # of the *original* SL distance), so they're scale-invariant across symbols.
+  enabled: false
+  breakeven_r: 1.0          # move SL to entry once gain >= this R; 0 to disable
+  breakeven_offset_atr: 0.05  # nudge BE SL by this fraction of ATR in the trade's favor
+  trail_start_r: 1.5        # start trailing SL once gain >= this R; 0 to disable
+  trail_distance_atr: 1.0   # trail SL at price - (this * ATR); only ratchets, never gives back
+  max_bars: 0               # force-close if open for this many bars without resolving (0 = no time stop)
 
 ml:
   enabled: true

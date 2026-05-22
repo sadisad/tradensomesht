@@ -164,6 +164,22 @@ class MT5Client:
             raise RuntimeError(f"symbol_info_tick({symbol}) returned None")
         return float(tick.ask if side == "buy" else tick.bid)
 
+    def current_spread_points(self, symbol: str) -> float:
+        """Current bid-ask spread expressed in *points* (1/point per symbol_info)."""
+        tick = mt5.symbol_info_tick(symbol)
+        if tick is None:
+            raise RuntimeError(f"symbol_info_tick({symbol}) returned None")
+        info = self.symbol_info(symbol)
+        point = float(getattr(info, "point", 0.0)) or 0.00001
+        return float(tick.ask - tick.bid) / point
+
+    def current_spread_price(self, symbol: str) -> float:
+        """Current bid-ask spread in raw price units."""
+        tick = mt5.symbol_info_tick(symbol)
+        if tick is None:
+            raise RuntimeError(f"symbol_info_tick({symbol}) returned None")
+        return float(tick.ask - tick.bid)
+
     # ------------------------------------------------------------------ orders
     def place_market_order(
         self,
@@ -254,6 +270,49 @@ class MT5Client:
             ok=ok,
             ticket=int(position.ticket),
             price=float(result.price) if ok else None,
+            retcode=int(result.retcode),
+            comment=str(result.comment),
+        )
+
+    def modify_position_sltp(
+        self,
+        position: Position,
+        sl: Optional[float] = None,
+        tp: Optional[float] = None,
+    ) -> OrderResult:
+        """Modify SL/TP for an existing position. Pass ``None`` to leave a value unchanged.
+
+        Returns OrderResult with ok=True on success. The broker rejects changes that
+        violate stops_level (e.g. SL too close to market); callers should check ``ok``.
+        """
+        new_sl = float(sl) if sl is not None else float(position.sl)
+        new_tp = float(tp) if tp is not None else float(position.tp)
+        if new_sl == position.sl and new_tp == position.tp:
+            # No-op; report as success without round-tripping the broker
+            return OrderResult(True, int(position.ticket), None, 0, "noop")
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "symbol": position.symbol,
+            "position": int(position.ticket),
+            "sl": new_sl,
+            "tp": new_tp,
+            "magic": int(self.magic),
+        }
+        result = mt5.order_send(request)
+        if result is None:
+            err = mt5.last_error()
+            log.error("modify_position_sltp returned None: %s", err)
+            return OrderResult(False, None, None, None, f"order_send None: {err}")
+        ok = result.retcode == mt5.TRADE_RETCODE_DONE
+        if not ok:
+            log.warning(
+                "modify_position_sltp failed: ticket=%s retcode=%s comment=%s sl=%.5f tp=%.5f",
+                position.ticket, result.retcode, result.comment, new_sl, new_tp,
+            )
+        return OrderResult(
+            ok=ok,
+            ticket=int(position.ticket),
+            price=None,
             retcode=int(result.retcode),
             comment=str(result.comment),
         )

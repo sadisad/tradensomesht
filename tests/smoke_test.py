@@ -21,6 +21,7 @@ from bot.journal import Journal, OpenTrade
 from bot.ml_filter import MLFilter
 from bot.risk import RiskManager
 from bot.strategy import EmaRsiAtrStrategy
+from bot.trade_management import ManagedPosition, TradeManager
 
 
 def make_synthetic_ohlcv(n: int = 5000, seed: int = 7) -> pd.DataFrame:
@@ -139,6 +140,153 @@ def test_risk_plan():
     assert plan.volume >= RISK_CFG["min_lot"]
 
 
+def test_phase1_risk_gates():
+    """Volatility regime, spread filter, weekly loss, Kelly scaling."""
+    cfg = dict(RISK_CFG)
+    cfg.update({
+        "regime_atr_pct_min": 0.05,
+        "regime_atr_pct_max": 0.30,
+        "max_spread_points": 30,
+        "max_spread_atr_ratio": 0.30,
+        "weekly_max_loss_pct": 6.0,
+        "scaling_mode": "kelly",
+        "scaling_min_samples": 10,
+        "scaling_floor": 0.5,
+        "scaling_ceiling": 1.5,
+        "kelly_fraction": 0.25,
+    })
+    rm = RiskManager(cfg, TRADING_CFG)
+
+    # regime: 0.01% ATR/price below 0.05% floor -> blocked
+    ok, _ = rm.volatility_regime_ok(atr_value=0.2, ref_price=2350.0)
+    assert not ok
+    # 0.10% inside band -> allowed
+    ok, _ = rm.volatility_regime_ok(atr_value=2.35, ref_price=2350.0)
+    assert ok
+    # 0.50% above ceiling -> blocked
+    ok, _ = rm.volatility_regime_ok(atr_value=11.75, ref_price=2350.0)
+    assert not ok
+
+    # spread: 50pt > 30pt cap -> blocked
+    ok, _ = rm.spread_acceptable(spread_points=50, atr_value=2.0, symbol_info=FakeSymbolInfo())
+    assert not ok
+    # 20pt with ATR=2.0 (at point=0.01 -> 200pts ATR) ratio=0.10 -> allowed
+    ok, _ = rm.spread_acceptable(spread_points=20, atr_value=2.0, symbol_info=FakeSymbolInfo())
+    assert ok
+
+    # weekly DD
+    assert rm.weekly_loss_breached(10000, 9300) is True   # -7%
+    assert rm.weekly_loss_breached(10000, 9700) is False  # -3%
+
+    # Kelly: ~5/10 wins -> ~1.0x; 9/10 wins -> hits ceiling; 2/10 wins -> floor
+    s_neutral = rm.risk_scale_from_history([1, 0] * 5)
+    assert 0.85 <= s_neutral <= 1.10, f"neutral wr should be near 1.0, got {s_neutral}"
+    s_great = rm.risk_scale_from_history([1] * 9 + [0])
+    assert s_great >= 1.4
+    s_bad = rm.risk_scale_from_history([0] * 8 + [1, 1])
+    assert s_bad <= 0.7
+
+    print("[OK] phase1 risk gates: regime, spread, weekly DD, Kelly scaling")
+
+
+def test_phase1_trade_management():
+    """Break-even, trailing stop, time stop."""
+    cfg = {
+        "enabled": True,
+        "breakeven_r": 1.0,
+        "breakeven_offset_atr": 0.05,
+        "trail_start_r": 1.5,
+        "trail_distance_atr": 1.0,
+        "max_bars": 50,
+    }
+    tm = TradeManager(cfg)
+    base = ManagedPosition(
+        ticket=1, side="buy", entry=100.0,
+        current_sl=98.0, current_tp=104.0,
+        original_sl_distance=2.0, atr=1.0,
+        opened_at=datetime.now(tz=timezone.utc),
+        bars_open=5,
+    )
+    # +0.5R: nothing fires
+    assert tm.evaluate(base, current_price=101.0) is None
+    # +1.2R: break-even should kick in
+    a = tm.evaluate(base, current_price=102.4)
+    assert a is not None and a.kind == "breakeven"
+    assert a.new_sl > base.entry > base.current_sl
+    # +1.6R: trail dominates
+    a = tm.evaluate(base, current_price=103.2)
+    assert a is not None and a.kind == "trail"
+    # time stop
+    base.bars_open = 200
+    a = tm.evaluate(base, current_price=101.0)
+    assert a is not None and a.kind == "time_stop"
+
+    # Sell side mirrors
+    sell = ManagedPosition(
+        ticket=2, side="sell", entry=100.0,
+        current_sl=102.0, current_tp=96.0,
+        original_sl_distance=2.0, atr=1.0,
+        opened_at=datetime.now(tz=timezone.utc),
+        bars_open=5,
+    )
+    a = tm.evaluate(sell, current_price=97.6)  # +1.2R
+    assert a is not None and a.kind == "breakeven"
+    assert a.new_sl < sell.entry < sell.current_sl
+
+    # Disabled config: every call returns None
+    tm_off = TradeManager({"enabled": False})
+    assert tm_off.evaluate(base, current_price=103.2) is None
+
+    print("[OK] phase1 trade management: break-even, trail, time stop, disabled gate")
+
+
+def test_phase1_strategy_mtf():
+    """MTF gate filters opposing-bias signals."""
+    df = make_synthetic_ohlcv(2000)
+    cfg = dict(STRATEGY_CFG)
+    cfg["mtf_enabled"] = True
+    cfg["mtf_ema_period"] = 50
+    strat = EmaRsiAtrStrategy(cfg, RISK_CFG)
+    ind = strat.prepare(df)
+
+    # Synthesize a clearly bullish HTF: monotone-increasing closes
+    htf_bull = pd.DataFrame(
+        {"open": np.arange(100, 200), "high": np.arange(100, 200) + 0.5,
+         "low": np.arange(100, 200) - 0.5, "close": np.arange(100, 200, dtype=float),
+         "volume": np.ones(100)},
+        index=pd.date_range("2024-01-01", periods=100, freq="1h", tz="UTC"),
+    )
+    # And bearish HTF
+    htf_bear = htf_bull.copy()
+    htf_bear[["open", "high", "low", "close"]] = htf_bull[["open", "high", "low", "close"]].iloc[::-1].values
+
+    # Bias resolution
+    assert strat.htf_bias(htf_bull) == "long"
+    assert strat.htf_bias(htf_bear) == "short"
+    assert strat.htf_bias(None) is None
+
+    # Sweep bars and count signals; bullish HTF should never let a sell through,
+    # bearish HTF should never let a buy through.
+    n_buy_with_bull, n_sell_with_bull = 0, 0
+    n_buy_with_bear, n_sell_with_bear = 0, 0
+    for i in range(220, len(ind)):
+        sub = ind.iloc[: i + 1]
+        s1 = strat.evaluate(sub, htf_df=htf_bull)
+        if s1:
+            n_buy_with_bull += int(s1.side == "buy")
+            n_sell_with_bull += int(s1.side == "sell")
+        s2 = strat.evaluate(sub, htf_df=htf_bear)
+        if s2:
+            n_buy_with_bear += int(s2.side == "buy")
+            n_sell_with_bear += int(s2.side == "sell")
+    assert n_sell_with_bull == 0, "bullish HTF should suppress sell signals"
+    assert n_buy_with_bear == 0, "bearish HTF should suppress buy signals"
+    print(
+        f"[OK] phase1 mtf: bull-htf -> {n_buy_with_bull} buys / {n_sell_with_bull} sells; "
+        f"bear-htf -> {n_buy_with_bear} buys / {n_sell_with_bear} sells"
+    )
+
+
 def test_journal_and_ml():
     with tempfile.TemporaryDirectory() as tmp:
         db = Path(tmp) / "j.db"
@@ -223,6 +371,9 @@ def main():
     test_strategy_evaluate()
     test_backtest()
     test_risk_plan()
+    test_phase1_risk_gates()
+    test_phase1_trade_management()
+    test_phase1_strategy_mtf()
     test_journal_and_ml()
     print("\nAll smoke tests passed.")
 

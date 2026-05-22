@@ -3,14 +3,15 @@
 Computes:
   * stop-loss / take-profit prices from ATR
   * position size from a fixed % of equity at risk per trade
-  * dynamic risk scaling based on recent win-rate
-  * pre-trade safety checks (daily loss limit, cooldowns, max open positions)
+  * dynamic risk scaling based on recent win-rate (linear or fractional Kelly)
+  * pre-trade safety checks: trading hours, post-loss cooldown, daily and weekly
+    loss limits, max open positions, spread cap, volatility regime
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .logging_setup import get_logger
 
@@ -150,17 +151,107 @@ class RiskManager:
         drop_pct = (start_of_day_equity - current_equity) / start_of_day_equity * 100.0
         return drop_pct >= limit
 
+    def weekly_loss_breached(
+        self,
+        start_of_week_equity: float,
+        current_equity: float,
+    ) -> bool:
+        limit = float(self.r.get("weekly_max_loss_pct", 0) or 0)
+        if limit <= 0 or start_of_week_equity <= 0:
+            return False
+        drop_pct = (start_of_week_equity - current_equity) / start_of_week_equity * 100.0
+        return drop_pct >= limit
+
+    def volatility_regime_ok(self, atr_value: float, ref_price: float) -> Tuple[bool, str]:
+        """Return (allowed, reason). ATR% outside the [floor, ceiling] band is rejected.
+
+        - Below the floor: market is dead chop, ATR-derived SLs collapse to ``min_stop_points``
+          floor and risk:reward becomes random.
+        - Above the ceiling: news spike or gap; spreads widen, slippage explodes,
+          historical ML doesn't generalize.
+        """
+        if ref_price <= 0:
+            return False, "regime:ref_price<=0"
+        atr_pct = float(atr_value) / float(ref_price) * 100.0
+        floor = float(self.r.get("regime_atr_pct_min", 0) or 0)
+        ceiling = float(self.r.get("regime_atr_pct_max", 0) or 0)
+        if floor > 0 and atr_pct < floor:
+            return False, f"regime_atr_pct_too_low({atr_pct:.4f}<{floor:.4f})"
+        if ceiling > 0 and atr_pct > ceiling:
+            return False, f"regime_atr_pct_too_high({atr_pct:.4f}>{ceiling:.4f})"
+        return True, ""
+
+    def spread_acceptable(
+        self,
+        spread_points: float,
+        atr_value: float,
+        symbol_info: Any,
+    ) -> Tuple[bool, str]:
+        """Reject when spread is large vs the SL we'd build off ATR, or vs an absolute cap.
+
+        Returns (allowed, reason).
+        """
+        cap_points = float(self.r.get("max_spread_points", 0) or 0)
+        if cap_points > 0 and spread_points > cap_points:
+            return False, f"spread_too_wide({spread_points:.1f}pts>{cap_points:.1f}pts)"
+        max_ratio = float(self.r.get("max_spread_atr_ratio", 0) or 0)
+        if max_ratio > 0 and atr_value > 0:
+            point = float(getattr(symbol_info, "point", 0.0)) or 0.00001
+            atr_points = float(atr_value) / point
+            ratio = spread_points / atr_points if atr_points > 0 else 0.0
+            if ratio > max_ratio:
+                return False, f"spread_atr_ratio_too_high({ratio:.3f}>{max_ratio:.3f})"
+        return True, ""
+
     # ------------------------------------------------------------------ adaptation
     def risk_scale_from_history(self, recent_outcomes: List[int]) -> float:
-        """Scale risk between 0.5x and 1.5x based on rolling win-rate.
+        """Scale risk based on rolling win-rate, using either linear blend or
+        fractional Kelly depending on ``risk.scaling_mode`` ("linear" or "kelly").
 
         ``recent_outcomes`` is a list of 1 (win) / 0 (loss) for the last N closed
-        trades of this setup. With <10 samples we don't scale (return 1.0).
+        trades of this setup. With <``risk.scaling_min_samples`` samples we don't
+        scale (return 1.0) so we don't whipsaw on noise.
         """
         n = len(recent_outcomes)
-        if n < 10:
+        min_samples = int(self.r.get("scaling_min_samples", 10))
+        if n < min_samples:
             return 1.0
+
         wr = sum(recent_outcomes) / n
+        mode = str(self.r.get("scaling_mode", "linear")).lower()
+
+        if mode == "kelly":
+            return self._kelly_scale(wr)
+        # default: linear win-rate blend
         # Map win-rate 0.30 -> 0.5x, 0.50 -> 1.0x, 0.70 -> 1.5x (clamped)
         scale = 0.5 + (wr - 0.30) * 2.5
         return max(0.5, min(1.5, scale))
+
+    def _kelly_scale(self, win_rate: float) -> float:
+        """Fractional-Kelly multiplier on base risk.
+
+        Kelly fraction:  f* = (b*p - q) / b   with b = TP_mult / SL_mult, q = 1-p.
+        We normalise by the Kelly fraction at p=0.5 so that "even-money win-rate
+        with positive R:R" maps to a 1.0x multiplier. Above 0.5 -> scale up,
+        below -> scale down. Then we apply ``kelly_fraction`` (default 0.25 =
+        quarter-Kelly) to dampen sensitivity to a noisy win-rate estimate, and
+        clamp to [scaling_floor, scaling_ceiling]. Negative-edge -> floor.
+        """
+        sl_mult = float(self.r.get("atr_sl_mult", 1.0))
+        tp_mult = float(self.r.get("atr_tp_mult", 1.0))
+        b = (tp_mult / sl_mult) if sl_mult > 0 else 1.0
+        if b <= 0:
+            return 1.0
+        p = float(win_rate)
+        kelly = (b * p - (1.0 - p)) / b
+        kelly_at_50 = (b * 0.5 - 0.5) / b
+        if kelly_at_50 <= 0:
+            return 1.0  # negative R:R: don't scale at all, base risk handles it
+        ratio = kelly / kelly_at_50
+        # Soft fractional-Kelly: blend toward 1.0 by (1 - kelly_fraction).
+        # kelly_fraction=1 -> use raw ratio; =0.25 -> mostly stay near 1.0.
+        frac = max(0.0, min(1.0, float(self.r.get("kelly_fraction", 0.25))))
+        mult = 1.0 + (ratio - 1.0) * frac
+        floor = float(self.r.get("scaling_floor", 0.5))
+        ceiling = float(self.r.get("scaling_ceiling", 1.5))
+        return max(floor, min(ceiling, mult))

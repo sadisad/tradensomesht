@@ -1,0 +1,46 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # MetaTrader5 is Windows-only and excluded by env marker on Linux.
+          pip install -r requirements.txt
+
+      - name: Compile all bot modules
+        run: |
+          python -m py_compile bot/__init__.py bot/config.py bot/logging_setup.py \
+            bot/broker_mt5.py bot/indicators.py bot/strategy.py bot/risk.py \
+            bot/journal.py bot/ml_filter.py bot/backtest.py bot/live.py \
+            bot/run_backtest.py bot/tools.py bot/dashboard.py \
+            bot/trade_management.py
+
+      - name: Run core smoke tests
+        run: python tests/smoke_test.py
+
+      - name: Run dashboard end-to-end test
+        run: python tests/dashboard_test.py

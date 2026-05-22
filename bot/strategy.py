@@ -8,6 +8,9 @@ Signal rules (long mirrored for short):
                    (i.e. fresh bullish cross), OR a pullback that holds the slow ema
                    while RSI is in the long zone
   * RSI gate:      rsi_long_min < rsi < rsi_long_max  (avoid chasing tops)
+  * MTF gate:      (optional) higher-timeframe close above its EMA confirms trend.
+                   Enabled via strategy.mtf_enabled. Without confirmation, signals
+                   in the opposite direction of the HTF trend are dropped.
 
 The strategy emits at most one signal per bar. The live loop decides whether
 to act on it based on risk, ML filter, cooldowns, and existing positions.
@@ -19,7 +22,7 @@ from typing import Any, Dict, Optional
 
 import pandas as pd
 
-from .indicators import add_indicators
+from .indicators import add_indicators, ema
 
 
 @dataclass
@@ -48,8 +51,39 @@ class EmaRsiAtrStrategy:
         )
 
     # ------------------------------------------------------------------
-    def evaluate(self, df_with_ind: pd.DataFrame) -> Optional[Signal]:
-        """Return a Signal for the *last closed* bar, or None."""
+    def htf_bias(self, htf_df: Optional[pd.DataFrame]) -> Optional[str]:
+        """Return "long", "short", or None given a higher-timeframe OHLCV frame.
+
+        Bias rule: HTF close vs HTF EMA(``mtf_ema_period``). Above -> long bias,
+        below -> short bias. Returns None if disabled or data is insufficient.
+        """
+        if htf_df is None or htf_df.empty:
+            return None
+        period = int(self.s.get("mtf_ema_period", 50))
+        if len(htf_df) < period + 2:
+            return None
+        ema_series = ema(htf_df["close"], period)
+        last_close = float(htf_df["close"].iloc[-1])
+        last_ema = float(ema_series.iloc[-1])
+        if pd.isna(last_ema):
+            return None
+        if last_close > last_ema:
+            return "long"
+        if last_close < last_ema:
+            return "short"
+        return None
+
+    # ------------------------------------------------------------------
+    def evaluate(
+        self,
+        df_with_ind: pd.DataFrame,
+        htf_df: Optional[pd.DataFrame] = None,
+    ) -> Optional[Signal]:
+        """Return a Signal for the *last closed* bar, or None.
+
+        If ``htf_df`` is provided AND ``strategy.mtf_enabled`` is true, signals
+        whose side conflicts with the HTF bias are filtered out.
+        """
         if len(df_with_ind) < int(self.s["ema_trend"]) + 5:
             return None
 
@@ -86,8 +120,15 @@ class EmaRsiAtrStrategy:
         rsi_long_ok = self.s["rsi_long_min"] < cur["rsi"] < self.s["rsi_long_max"]
         rsi_short_ok = self.s["rsi_short_min"] < cur["rsi"] < self.s["rsi_short_max"]
 
+        mtf_enabled = bool(self.s.get("mtf_enabled", False))
+        bias = self.htf_bias(htf_df) if mtf_enabled else None
+
         if long_trend and (bull_cross or long_pullback) and rsi_long_ok:
+            if mtf_enabled and bias == "short":
+                return None
             reason = "bull_cross" if bull_cross else "long_pullback"
+            if bias == "long":
+                reason += "+mtf"
             return Signal(
                 side="buy",
                 reason=reason,
@@ -97,7 +138,11 @@ class EmaRsiAtrStrategy:
             )
 
         if short_trend and (bear_cross or short_pullback) and rsi_short_ok:
+            if mtf_enabled and bias == "long":
+                return None
             reason = "bear_cross" if bear_cross else "short_pullback"
+            if bias == "short":
+                reason += "+mtf"
             return Signal(
                 side="sell",
                 reason=reason,
