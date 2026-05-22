@@ -185,26 +185,40 @@ class Journal:
             )
 
     # ------------------------------------------------------------------ queries
-    def open_tickets(self) -> List[int]:
+    def open_tickets(self, symbol: Optional[str] = None) -> List[int]:
+        sql = "SELECT ticket FROM trades WHERE closed_at IS NULL"
+        params: List[Any] = []
+        if symbol:
+            sql += " AND symbol = ?"
+            params.append(symbol)
         with self._conn() as c:
-            rows = c.execute(
-                "SELECT ticket FROM trades WHERE closed_at IS NULL"
-            ).fetchall()
+            rows = c.execute(sql, params).fetchall()
             return [int(r["ticket"]) for r in rows]
 
-    def last_loss_time(self) -> Optional[datetime]:
+    def last_loss_time(self, symbol: Optional[str] = None) -> Optional[datetime]:
+        sql = "SELECT closed_at FROM trades WHERE outcome = 0"
+        params: List[Any] = []
+        if symbol:
+            sql += " AND symbol = ?"
+            params.append(symbol)
+        sql += " ORDER BY closed_at DESC LIMIT 1"
         with self._conn() as c:
-            row = c.execute(
-                "SELECT closed_at FROM trades "
-                "WHERE outcome = 0 ORDER BY closed_at DESC LIMIT 1"
-            ).fetchone()
+            row = c.execute(sql, params).fetchone()
             if not row or not row["closed_at"]:
                 return None
             return _from_iso(row["closed_at"])
 
-    def recent_outcomes(self, n: int = 30, side: Optional[str] = None) -> List[int]:
+    def recent_outcomes(
+        self,
+        n: int = 30,
+        side: Optional[str] = None,
+        symbol: Optional[str] = None,
+    ) -> List[int]:
         sql = "SELECT outcome FROM trades WHERE outcome IS NOT NULL"
         params: List[Any] = []
+        if symbol:
+            sql += " AND symbol = ?"
+            params.append(symbol)
         if side:
             sql += " AND side = ?"
             params.append(side)
@@ -214,19 +228,25 @@ class Journal:
             rows = c.execute(sql, params).fetchall()
         return [int(r["outcome"]) for r in rows]
 
-    def closed_count(self) -> int:
+    def closed_count(self, symbol: Optional[str] = None) -> int:
+        sql = "SELECT COUNT(*) AS n FROM trades WHERE outcome IS NOT NULL"
+        params: List[Any] = []
+        if symbol:
+            sql += " AND symbol = ?"
+            params.append(symbol)
         with self._conn() as c:
-            row = c.execute(
-                "SELECT COUNT(*) AS n FROM trades WHERE outcome IS NOT NULL"
-            ).fetchone()
+            row = c.execute(sql, params).fetchone()
             return int(row["n"])
 
-    def closed_trades_df(self) -> pd.DataFrame:
+    def closed_trades_df(self, symbol: Optional[str] = None) -> pd.DataFrame:
+        sql = "SELECT * FROM trades WHERE outcome IS NOT NULL"
+        params: List[Any] = []
+        if symbol:
+            sql += " AND symbol = ?"
+            params.append(symbol)
+        sql += " ORDER BY closed_at"
         with self._conn() as c:
-            df = pd.read_sql_query(
-                "SELECT * FROM trades WHERE outcome IS NOT NULL ORDER BY closed_at",
-                c,
-            )
+            df = pd.read_sql_query(sql, c, params=params)
         return df
 
     # ------------------------------------------------------------------ export

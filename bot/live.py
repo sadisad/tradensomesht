@@ -198,7 +198,7 @@ class LiveBot:
         try:
             sym_info = self.client.symbol_info(self.symbol)
             equity = self.client.account_equity()
-            recent = self.journal.recent_outcomes(n=30, side=sig.side)
+            recent = self.journal.recent_outcomes(n=30, side=sig.side, symbol=self.symbol)
             risk_scale = self.risk.risk_scale_from_history(recent)
             plan = self.risk.build_plan(
                 side=sig.side,
@@ -238,7 +238,7 @@ class LiveBot:
             self._place_demo(sig, plan, features, proba)
 
         # 8. Maybe retrain
-        report = self.ml.maybe_retrain(self.journal)
+        report = self.ml.maybe_retrain(self.journal, symbol=self.symbol)
         if report is not None:
             log.info("ML retrain summary: %s", report)
 
@@ -246,7 +246,7 @@ class LiveBot:
     def _pre_trade_block_reason(self, proba: float, sig=None) -> Optional[str]:
         if not self.risk.within_trading_hours():
             return "outside_trading_hours"
-        last_loss = self.journal.last_loss_time()
+        last_loss = self.journal.last_loss_time(symbol=self.symbol)
         if self.risk.cooldown_active(last_loss):
             return "cooldown_after_loss"
         equity = self.client.account_equity() if self.mode == "demo" else self._start_of_day_equity
@@ -552,7 +552,7 @@ class LiveBot:
                 out_by_pos[pid]["time"] = d["time"]
                 out_by_pos[pid]["comment"] = d["comment"]
 
-        open_tickets = set(self.journal.open_tickets())
+        open_tickets = set(self.journal.open_tickets(symbol=self.symbol))
         for pid, info in out_by_pos.items():
             if pid not in open_tickets:
                 continue

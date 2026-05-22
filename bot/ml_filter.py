@@ -110,18 +110,18 @@ class MLFilter:
         return proba >= self.min_proba
 
     # ------------------------------------------------------------------ training
-    def maybe_retrain(self, journal) -> Optional[TrainReport]:
+    def maybe_retrain(self, journal, symbol: Optional[str] = None) -> Optional[TrainReport]:
         if not self.enabled:
             return None
-        n_closed = journal.closed_count()
+        n_closed = journal.closed_count(symbol=symbol)
         if n_closed < self.min_train_samples:
             return None
         if n_closed - self._last_trained_at_count < self.retrain_every and self.model is not None:
             return None
-        return self.retrain(journal)
+        return self.retrain(journal, symbol=symbol)
 
-    def retrain(self, journal) -> Optional[TrainReport]:
-        df = journal.closed_trades_df()
+    def retrain(self, journal, symbol: Optional[str] = None) -> Optional[TrainReport]:
+        df = journal.closed_trades_df(symbol=symbol)
         if df.empty:
             return None
 

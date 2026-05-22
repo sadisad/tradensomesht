@@ -240,6 +240,75 @@ def test_phase1_trade_management():
     print("[OK] phase1 trade management: break-even, trail, time stop, disabled gate")
 
 
+def test_phase1_journal_symbol_scoping():
+    """Multi-pair regression: journal queries must scope to the requested symbol."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "j.db"
+        j = Journal(db)
+        base = datetime.now(tz=timezone.utc) - timedelta(days=1)
+        # Seed: GBPUSD 4 wins / 2 losses; USDJPY 1 win / 3 losses (different distributions)
+        plan = [
+            ("GBPUSD", "buy", 1), ("GBPUSD", "buy", 1), ("GBPUSD", "sell", 1), ("GBPUSD", "sell", 1),
+            ("GBPUSD", "buy", 0), ("GBPUSD", "sell", 0),
+            ("USDJPY", "buy", 1),
+            ("USDJPY", "buy", 0), ("USDJPY", "sell", 0), ("USDJPY", "sell", 0),
+        ]
+        for k, (sym, side, outcome) in enumerate(plan):
+            opened = base + timedelta(minutes=k * 30)
+            closed = opened + timedelta(minutes=15)
+            j.record_open(OpenTrade(
+                ticket=1000 + k, symbol=sym, side=side,
+                volume=0.10, entry_price=1.0, sl=0.99, tp=1.02,
+                atr=0.001, risk_money=10.0, risk_pct=0.25,
+                reason="seed", features={c: 0.0 for c in FEATURE_COLUMNS},
+                opened_at=opened, magic=1,
+            ))
+            j.record_close(
+                ticket=1000 + k, closed_at=closed,
+                close_price=1.02 if outcome else 0.99,
+                close_reason="tp" if outcome else "sl",
+                pnl=10.0 if outcome else -5.0,
+            )
+
+        # closed_count
+        assert j.closed_count() == 10
+        assert j.closed_count(symbol="GBPUSD") == 6
+        assert j.closed_count(symbol="USDJPY") == 4
+
+        # last_loss_time: must be the most recent loss for *that* symbol
+        gbp_last = j.last_loss_time(symbol="GBPUSD")
+        jpy_last = j.last_loss_time(symbol="USDJPY")
+        assert gbp_last is not None and jpy_last is not None
+        # USDJPY's last loss is later than GBPUSD's (USDJPY losses come after in the plan)
+        assert jpy_last > gbp_last, (gbp_last, jpy_last)
+
+        # recent_outcomes: per-symbol win-rate must differ
+        gbp_outcomes = j.recent_outcomes(n=10, symbol="GBPUSD")
+        jpy_outcomes = j.recent_outcomes(n=10, symbol="USDJPY")
+        assert sum(gbp_outcomes) == 4 and len(gbp_outcomes) == 6
+        assert sum(jpy_outcomes) == 1 and len(jpy_outcomes) == 4
+
+        # closed_trades_df: only rows for the requested symbol
+        gbp_df = j.closed_trades_df(symbol="GBPUSD")
+        assert (gbp_df["symbol"] == "GBPUSD").all()
+        assert len(gbp_df) == 6
+
+        # open_tickets: also scopes
+        for sym, ticket in [("GBPUSD", 9001), ("USDJPY", 9002)]:
+            j.record_open(OpenTrade(
+                ticket=ticket, symbol=sym, side="buy",
+                volume=0.10, entry_price=1.0, sl=0.99, tp=1.02,
+                atr=0.001, risk_money=10.0, risk_pct=0.25,
+                reason="open", features={c: 0.0 for c in FEATURE_COLUMNS},
+                opened_at=datetime.now(tz=timezone.utc), magic=1,
+            ))
+        assert set(j.open_tickets()) == {9001, 9002}
+        assert j.open_tickets(symbol="GBPUSD") == [9001]
+        assert j.open_tickets(symbol="USDJPY") == [9002]
+
+    print("[OK] phase1 journal scoping: closed_count, last_loss_time, recent_outcomes, closed_trades_df, open_tickets")
+
+
 def test_phase1_strategy_mtf():
     """MTF gate filters opposing-bias signals."""
     df = make_synthetic_ohlcv(2000)
@@ -373,6 +442,7 @@ def main():
     test_risk_plan()
     test_phase1_risk_gates()
     test_phase1_trade_management()
+    test_phase1_journal_symbol_scoping()
     test_phase1_strategy_mtf()
     test_journal_and_ml()
     print("\nAll smoke tests passed.")
