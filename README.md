@@ -22,6 +22,7 @@ better the more it trades.
 - Safety guards: trading-hours window, post-loss cooldown, daily loss kill-switch, max open positions, paper mode
 - Vectorised backtester for offline strategy validation
 - SQLite trade journal + CSV export
+- Live web dashboard (FastAPI + lightweight-charts) to watch the bot in real time
 
 ## Project layout
 
@@ -42,6 +43,8 @@ bot/
   live.py            # the live loop (entrypoint)
   run_backtest.py    # backtest CLI
   tools.py           # retrain / export / stats CLI
+  dashboard.py       # FastAPI dashboard server
+  static/            # HTML / CSS / JS for the dashboard
 data/                # journal db, logs, csv exports (gitignored)
 models/              # trained ML model (gitignored)
 ```
@@ -109,6 +112,32 @@ python -m bot.run_backtest --csv data/xauusd_m5.csv
 python -m bot.tools stats               # journal summary
 python -m bot.tools retrain             # force ML retrain from journal
 python -m bot.tools export --out data/trades.csv
+```
+
+### Live dashboard
+
+Open a second terminal (the bot keeps running in the first one):
+
+```powershell
+python -m bot.dashboard
+```
+
+Then open http://127.0.0.1:8765 in a browser. You'll see:
+
+- Connection status, account equity / balance, current bid/ask
+- Live candlestick chart of the configured symbol/timeframe
+- Trade entry/exit markers overlaid on the chart (green = buy / win, red = sell / loss)
+- Open positions table with live PnL (demo mode pulls from MT5; paper mode reads the journal)
+- Recent signals feed (acted vs skipped, with skip reason and ML probability)
+- Recent closed trades with PnL and W/L
+- 24h activity stats and overall win-rate
+
+The dashboard polls every 5 seconds, refreshes the full chart every 15 seconds,
+and runs read-only against MT5 + the journal. It's safe to leave open while the
+bot trades. Bind to a non-loopback host carefully:
+
+```powershell
+python -m bot.dashboard --host 0.0.0.0 --port 8765   # exposes to your LAN
 ```
 
 ## How the self-improvement loop works
