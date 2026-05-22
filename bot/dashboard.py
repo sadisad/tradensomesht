@@ -144,7 +144,7 @@ def create_app(cfg: Dict[str, Any]) -> FastAPI:
 
     @app.get("/api/candles")
     def api_candles(
-        bars: int = Query(500, ge=50, le=5000),
+        bars: int = Query(500, ge=1, le=5000),
         timeframe: Optional[str] = None,
     ):
         client = _try_mt5()
