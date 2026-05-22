@@ -289,11 +289,30 @@
   }
 
   // ----------------------------------------------------------------- symbol picker
+  /** Read ``?symbols=A,B,C`` (or hash equivalent) from the page URL. Lets you
+   * pin pairs into the picker that haven't traded yet (useful while waiting for
+   * the first signal on a freshly-started bot). */
+  function readSeedSymbols() {
+    try {
+      const qs = new URLSearchParams(window.location.search);
+      const fromQuery = qs.get("symbols");
+      if (fromQuery) return fromQuery;
+      // Also support #symbols=... in case the user prefers it
+      const hash = (window.location.hash || "").replace(/^#/, "");
+      const hashParams = new URLSearchParams(hash);
+      return hashParams.get("symbols") || "";
+    } catch (_) {
+      return "";
+    }
+  }
+
   async function initSymbolPicker() {
     const sel = document.getElementById("symbol-select");
     if (!sel) return;
+    const seed = readSeedSymbols();
+    const url = seed ? `/api/symbols?seed=${encodeURIComponent(seed)}` : "/api/symbols";
     try {
-      const r = await getJSON("/api/symbols");
+      const r = await getJSON(url);
       knownSymbols = r.symbols || [];
       // If localStorage had a stale symbol the bot no longer reports, fall back
       // to the dashboard's configured default.
@@ -325,6 +344,27 @@
         loadCandlesFull();
         tick();
       });
+      // Re-poll the symbol list periodically so newly-active pairs appear
+      // without a page reload. Cheap query against the journal.
+      setInterval(async () => {
+        try {
+          const rr = await getJSON(url);
+          const fresh = rr.symbols || [];
+          if (fresh.length === knownSymbols.length &&
+              fresh.every((v, i) => v === knownSymbols[i])) return;
+          knownSymbols = fresh;
+          // Repopulate the dropdown without dropping the current selection
+          const cur = currentSymbol;
+          sel.innerHTML = "";
+          knownSymbols.forEach((s) => {
+            const opt = document.createElement("option");
+            opt.value = s;
+            opt.textContent = s;
+            if (s === cur) opt.selected = true;
+            sel.appendChild(opt);
+          });
+        } catch (_) { /* transient */ }
+      }, 30_000);
     } catch (e) {
       console.warn("symbol picker init failed:", e);
     }

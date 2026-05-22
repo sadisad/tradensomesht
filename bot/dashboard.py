@@ -85,9 +85,17 @@ def _row_to_dict(r: sqlite3.Row) -> Dict[str, Any]:
     return {k: r[k] for k in r.keys()}
 
 
-def _available_symbols(default: str) -> List[str]:
-    """Symbols this dashboard knows about: union of journal-observed symbols + config default."""
-    syms = {default} if default else set()
+def _available_symbols(default: str, seed: Optional[List[str]] = None) -> List[str]:
+    """Symbols this dashboard knows about: union of seed list + journal-observed
+    symbols + the configured default. Seeds let multi-bot setups force pairs
+    into the picker even before any signal has been recorded."""
+    syms = set()
+    if default:
+        syms.add(default)
+    if seed:
+        for s in seed:
+            if s:
+                syms.add(s)
     try:
         with _db() as c:
             for r in c.execute("SELECT DISTINCT symbol FROM trades WHERE symbol IS NOT NULL"):
@@ -132,10 +140,20 @@ def create_app(cfg: Dict[str, Any]) -> FastAPI:
         return FileResponse(idx)
 
     @app.get("/api/symbols")
-    def api_symbols():
-        """List of symbols the dashboard can switch between (journal + config default)."""
+    def api_symbols(seed: Optional[str] = None):
+        """List of symbols the dashboard can switch between (journal + config default
+        + any seed overrides). ``seed`` is a comma-separated list, e.g.
+        ``?seed=GBPUSD,USDJPY,USDCAD`` to force-include pairs that haven't traded yet."""
         default = cfg["trading"]["symbol"]
-        return {"default": default, "symbols": _available_symbols(default)}
+        seed_list = [s.strip() for s in (seed or "").split(",") if s.strip()] if seed else None
+        # Also pick up any default seed configured on the dashboard itself
+        cfg_seed = cfg.get("dashboard", {}).get("seed_symbols")
+        if cfg_seed and not seed_list:
+            seed_list = list(cfg_seed)
+        return {
+            "default": default,
+            "symbols": _available_symbols(default, seed=seed_list),
+        }
 
     @app.get("/api/status")
     def api_status(symbol: Optional[str] = None):
