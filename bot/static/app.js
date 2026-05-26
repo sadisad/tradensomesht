@@ -4,6 +4,7 @@
 
   const REFRESH_MS = 5000;
   const CHART_REFRESH_MS = 15000;
+  const NEWS_REFRESH_MS = 120000;
 
   let chart = null;
   let candleSeries = null;
@@ -11,6 +12,8 @@
   let equitySeries = null;
   let lastCandleTime = 0;
   let lastChartLoad = 0;
+  let lastNewsLoad = 0;
+  let newsTag = "";
 
   // Currently-selected symbol. Initialised from localStorage on boot, then
   // overwritten once /api/symbols replies with the canonical list.
@@ -288,6 +291,95 @@
     } catch (_) {}
   }
 
+  // ----------------------------------------------------------------- news
+  function fmtAge(iso) {
+    if (!iso) return "";
+    const t = Date.parse(iso);
+    if (isNaN(t)) return "";
+    const diff = Math.max(0, Date.now() - t);
+    const m = Math.floor(diff / 60000);
+    if (m < 1)  return "just now";
+    if (m < 60) return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h ago`;
+    const d = Math.floor(h / 24);
+    return `${d}d ago`;
+  }
+
+  function escapeHTML(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
+  function renderNews(items) {
+    const list = document.getElementById("news-list");
+    const empty = document.getElementById("news-empty");
+    if (!list) return;
+    list.innerHTML = "";
+    if (!items || !items.length) {
+      empty.hidden = false;
+      return;
+    }
+    empty.hidden = true;
+    items.forEach((it) => {
+      const tags = (it.tags || [])
+        .filter((t) => t === "gold" || t === "forex")
+        .map((t) => `<span class="news-tag tag-${t}">${t}</span>`)
+        .join("");
+      const li = document.createElement("li");
+      li.className = "news-item";
+      li.innerHTML = `
+        <a class="news-link" href="${escapeHTML(it.link)}" target="_blank" rel="noopener noreferrer">
+          <div class="news-meta">
+            <span class="news-source">${escapeHTML(it.source || "")}</span>
+            ${tags}
+            <span class="news-age">${escapeHTML(fmtAge(it.published_at))}</span>
+          </div>
+          <h4 class="news-title">${escapeHTML(it.title)}</h4>
+          ${it.summary ? `<p class="news-summary">${escapeHTML(it.summary)}</p>` : ""}
+        </a>
+      `;
+      list.appendChild(li);
+    });
+  }
+
+  async function refreshNews(force) {
+    const sub = document.getElementById("news-sub");
+    try {
+      const qs = new URLSearchParams();
+      qs.set("limit", "12");
+      if (newsTag) qs.set("tag", newsTag);
+      if (force) qs.set("refresh", "1");
+      const r = await getJSON(`/api/news?${qs.toString()}`);
+      renderNews(r.items);
+      const fetched = r.fetched_at ? fmtAge(r.fetched_at) : "now";
+      const label = newsTag ? newsTag.toUpperCase() : "ALL";
+      if (sub) {
+        sub.textContent = r.error
+          ? `${label} | partial data | updated ${fetched}`
+          : `${label} | ${r.items.length} of ${r.total} | updated ${fetched}`;
+      }
+      lastNewsLoad = Date.now();
+    } catch (e) {
+      if (sub) sub.textContent = `news error: ${e.message}`;
+    }
+  }
+
+  function initNewsControls() {
+    const seg = document.querySelectorAll(".seg-btn[data-news-tag]");
+    if (!seg.length) return;
+    seg.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const tag = btn.dataset.newsTag || "";
+        if (tag === newsTag) return;
+        newsTag = tag;
+        seg.forEach((b) => b.classList.toggle("is-active", b === btn));
+        refreshNews(false);
+      });
+    });
+  }
+
   // ----------------------------------------------------------------- symbol picker
   /** Read ``?symbols=A,B,C`` (or hash equivalent) from the page URL. Lets you
    * pin pairs into the picker that haven't traded yet (useful while waiting for
@@ -385,6 +477,12 @@
       // Reload candles + markers periodically (cheap)
       loadCandlesFull();
     }
+    if (Date.now() - lastNewsLoad > NEWS_REFRESH_MS) {
+      // News are server-cached for 5 min, but we still pull more often so
+      // the relative-age labels stay fresh and the user sees new items soon
+      // after the cache expires.
+      refreshNews(false);
+    }
     setText("last-update", new Date().toISOString().replace("T", " ").slice(11, 19) + "Z");
   }
 
@@ -392,8 +490,10 @@
     const secs = String(REFRESH_MS / 1000);
     setText("refresh-secs", secs);
     setText("refresh-secs-foot", secs);
+    initNewsControls();
     await initSymbolPicker();
     loadCandlesFull();
+    refreshNews(false);
     tick();
     setInterval(tick, REFRESH_MS);
   });

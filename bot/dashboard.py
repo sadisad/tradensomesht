@@ -16,12 +16,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sqlite3
 import sys
+import threading
+import time as _time
+import urllib.error
+import urllib.request
+import xml.etree.ElementTree as ET
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
@@ -119,6 +126,257 @@ def _resolve_symbol(requested: Optional[str], default: str) -> str:
     if not all(ch.isalnum() or ch in "._-" for ch in cleaned):
         return default
     return cleaned
+
+
+# ---------------------------------------------------------------------- news
+# Curated forex / gold RSS feeds. Each entry is (source label, URL, default tags).
+# Only public RSS endpoints -- no API keys required. We fetch, parse, dedup, and
+# cache in-memory so a busy dashboard doesn't hammer the upstream sources.
+_NEWS_FEEDS: List[Dict[str, Any]] = [
+    {
+        "source": "ForexLive",
+        "url": "https://www.forexlive.com/feed/news",
+        "tags": ["forex"],
+    },
+    {
+        "source": "Investing.com - Forex",
+        "url": "https://www.investing.com/rss/forex.rss",
+        "tags": ["forex"],
+    },
+    {
+        "source": "Investing.com - Commodities",
+        "url": "https://www.investing.com/rss/news_11.rss",
+        "tags": ["gold", "commodities"],
+    },
+    {
+        "source": "ActionForex",
+        "url": "https://www.actionforex.com/feed/",
+        "tags": ["forex"],
+    },
+    {
+        "source": "MarketWatch - Market Pulse",
+        "url": "https://feeds.marketwatch.com/marketwatch/marketpulse/",
+        "tags": ["markets"],
+    },
+]
+
+# Keywords used to auto-tag items as gold/forex regardless of feed origin.
+_GOLD_KEYWORDS = (
+    "gold", "xau", "bullion", "precious metal", "metals", "silver", "kitco",
+)
+_FOREX_KEYWORDS = (
+    "forex", "fx", "dollar", "usd", "eur", "gbp", "jpy", "cad", "aud", "nzd",
+    "chf", "yuan", "yen", "pound", "euro", "currency", "currencies", "fed",
+    "ecb", "boj", "boe", "rba", "rbnz", "snb", "central bank", "rate hike",
+    "rate cut", "interest rate", "cpi", "inflation", "nfp", "non-farm",
+)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"\s+")
+
+
+class _NewsCache:
+    """Thread-safe in-memory cache for the merged news feed.
+
+    The dashboard refreshes every few seconds, so we don't want each browser
+    tick to trigger 5 outbound HTTP fetches. TTL keeps things fresh enough for
+    a trading sidebar without being abusive to upstream providers.
+    """
+
+    def __init__(self, ttl_seconds: int = 300) -> None:
+        self.ttl = ttl_seconds
+        self._lock = threading.Lock()
+        self._items: List[Dict[str, Any]] = []
+        self._fetched_at: float = 0.0
+        self._last_error: Optional[str] = None
+
+    def get(self, force: bool = False) -> Dict[str, Any]:
+        now = _time.time()
+        with self._lock:
+            stale = (now - self._fetched_at) > self.ttl
+            if not force and not stale and self._items:
+                return self._snapshot()
+        # Fetch outside the lock so concurrent readers aren't blocked.
+        items, err = _fetch_all_news()
+        with self._lock:
+            if items:
+                self._items = items
+                self._fetched_at = now
+                self._last_error = None
+            else:
+                # Preserve the previous cache if every feed failed; surface the
+                # error so the UI can show a hint instead of going blank.
+                self._last_error = err
+                if not self._items:
+                    self._fetched_at = now  # avoid hot-looping on outage
+            return self._snapshot()
+
+    def _snapshot(self) -> Dict[str, Any]:
+        return {
+            "items": list(self._items),
+            "fetched_at": datetime.fromtimestamp(self._fetched_at, tz=timezone.utc).isoformat()
+                          if self._fetched_at else None,
+            "ttl_seconds": self.ttl,
+            "error": self._last_error,
+        }
+
+
+_NEWS_CACHE = _NewsCache(ttl_seconds=300)
+
+
+def _strip_html(text: str) -> str:
+    if not text:
+        return ""
+    txt = _HTML_TAG_RE.sub(" ", text)
+    txt = txt.replace("&nbsp;", " ").replace("&amp;", "&").replace("&quot;", '"') \
+             .replace("&apos;", "'").replace("&lt;", "<").replace("&gt;", ">")
+    txt = _WS_RE.sub(" ", txt).strip()
+    return txt
+
+
+def _parse_pub_date(raw: Optional[str]) -> Optional[datetime]:
+    if not raw:
+        return None
+    try:
+        dt = parsedate_to_datetime(raw)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _classify_tags(title: str, summary: str, base: Iterable[str]) -> List[str]:
+    """Merge feed-level tags with keyword-derived tags so callers can filter by
+    'gold' / 'forex' regardless of which feed an item came from."""
+    blob = f"{title} {summary}".lower()
+    tags = {t.lower() for t in base if t}
+    if any(k in blob for k in _GOLD_KEYWORDS):
+        tags.add("gold")
+    if any(k in blob for k in _FOREX_KEYWORDS):
+        tags.add("forex")
+    return sorted(tags)
+
+
+def _parse_rss(xml_text: str, feed: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Minimal RSS 2.0 / Atom parser. We avoid a feedparser dependency to keep
+    the dashboard's footprint small; these feeds are well-formed enough."""
+    items: List[Dict[str, Any]] = []
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return items
+
+    # RSS 2.0: channel/item; Atom: feed/entry. Handle both.
+    rss_items = root.findall(".//item")
+    if rss_items:
+        for it in rss_items:
+            title = _strip_html((it.findtext("title") or "").strip())
+            link = (it.findtext("link") or "").strip()
+            desc = _strip_html((it.findtext("description") or "").strip())
+            pub = _parse_pub_date(it.findtext("pubDate"))
+            if not title or not link:
+                continue
+            items.append({
+                "title": title,
+                "link": link,
+                "summary": desc[:280],
+                "published_at": pub.isoformat() if pub else None,
+                "_published_ts": pub.timestamp() if pub else 0.0,
+                "source": feed["source"],
+                "tags": _classify_tags(title, desc, feed.get("tags", [])),
+            })
+        return items
+
+    # Atom fallback
+    ns = {"a": "http://www.w3.org/2005/Atom"}
+    for entry in root.findall("a:entry", ns):
+        title = _strip_html((entry.findtext("a:title", default="", namespaces=ns) or "").strip())
+        link_el = entry.find("a:link", ns)
+        link = link_el.get("href", "").strip() if link_el is not None else ""
+        summary = _strip_html((entry.findtext("a:summary", default="", namespaces=ns) or "").strip())
+        updated = entry.findtext("a:updated", default="", namespaces=ns) \
+                  or entry.findtext("a:published", default="", namespaces=ns)
+        pub = None
+        if updated:
+            try:
+                pub = datetime.fromisoformat(updated.replace("Z", "+00:00")).astimezone(timezone.utc)
+            except ValueError:
+                pub = None
+        if not title or not link:
+            continue
+        items.append({
+            "title": title,
+            "link": link,
+            "summary": summary[:280],
+            "published_at": pub.isoformat() if pub else None,
+            "_published_ts": pub.timestamp() if pub else 0.0,
+            "source": feed["source"],
+            "tags": _classify_tags(title, summary, feed.get("tags", [])),
+        })
+    return items
+
+
+def _fetch_one_feed(feed: Dict[str, Any], timeout: float = 6.0) -> List[Dict[str, Any]]:
+    req = urllib.request.Request(
+        feed["url"],
+        headers={
+            # Some providers (Investing.com, Kitco) reject default Python UA.
+            "User-Agent": "AxiomOmega/1.0 (+dashboard news widget)",
+            "Accept": "application/rss+xml, application/xml, text/xml, */*;q=0.1",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = r.read()
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        log.warning("news fetch failed for %s: %s", feed["source"], e)
+        return []
+    try:
+        text = data.decode("utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        return []
+    return _parse_rss(text, feed)
+
+
+def _fetch_all_news() -> tuple[List[Dict[str, Any]], Optional[str]]:
+    """Fan-out fetch across all feeds, dedup by link, sort newest first."""
+    threads: List[threading.Thread] = []
+    results: Dict[str, List[Dict[str, Any]]] = {}
+    errors: List[str] = []
+
+    def worker(f: Dict[str, Any]) -> None:
+        try:
+            results[f["source"]] = _fetch_one_feed(f)
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{f['source']}: {e}")
+            results[f["source"]] = []
+
+    for f in _NEWS_FEEDS:
+        t = threading.Thread(target=worker, args=(f,), daemon=True)
+        t.start()
+        threads.append(t)
+    for t in threads:
+        t.join(timeout=8.0)
+
+    merged: Dict[str, Dict[str, Any]] = {}
+    for items in results.values():
+        for it in items:
+            key = it.get("link") or it.get("title")
+            if not key:
+                continue
+            # First seen wins, but prefer the entry with a parsed timestamp.
+            existing = merged.get(key)
+            if existing is None or (existing["_published_ts"] == 0.0 and it["_published_ts"] > 0):
+                merged[key] = it
+
+    out = sorted(merged.values(), key=lambda x: x.get("_published_ts", 0.0), reverse=True)
+    # Drop the internal sort key before returning
+    for it in out:
+        it.pop("_published_ts", None)
+    err = "; ".join(errors) if errors and not out else None
+    return out, err
 
 
 # ---------------------------------------------------------------------- app factory
@@ -415,6 +673,28 @@ def create_app(cfg: Dict[str, Any]) -> FastAPI:
         # Sort ascending by time for chart consumption
         markers.sort(key=lambda m: m["time"])
         return {"markers": markers}
+
+    @app.get("/api/news")
+    def api_news(
+        limit: int = Query(20, ge=1, le=100),
+        tag: Optional[str] = Query(None, description="Filter: 'gold', 'forex', or comma-separated"),
+        refresh: bool = Query(False, description="Force-refresh the cache"),
+    ):
+        """Aggregated forex / gold news from public RSS feeds. Cached server-side
+        for 5 minutes (configurable via ``_NewsCache.ttl``)."""
+        snap = _NEWS_CACHE.get(force=refresh)
+        items = snap["items"]
+        if tag:
+            wanted = {t.strip().lower() for t in tag.split(",") if t.strip()}
+            if wanted:
+                items = [it for it in items if wanted.intersection(set(it.get("tags", [])))]
+        return {
+            "items": items[: int(limit)],
+            "total": len(items),
+            "fetched_at": snap["fetched_at"],
+            "ttl_seconds": snap["ttl_seconds"],
+            "error": snap["error"],
+        }
 
     return app
 
