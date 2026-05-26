@@ -96,6 +96,44 @@ trading:
 Then `python -m bot.live` again. Orders are sent with the configured magic
 number; the bot only sees / closes its own positions.
 
+### Multi-pair (one supervisor, one process per pair)
+
+For each pair you want to trade, drop a `config.local.<pair>.yaml` in the
+project root with that pair's `trading.symbol`, a unique `broker.magic`,
+its own `ml.model_path` (e.g. `models/ml_filter_<pair>.joblib`), and its own
+`logging.file` (e.g. `data/bot_<pair>.log`). All pairs can share
+`data/journal.db`; SQLite handles concurrent writers.
+
+Available pairs ship pre-tuned: `gbpusd`, `usdjpy`, `usdcad`, `eurusd`,
+`audusd`, `xauusd`. Each one is a stand-alone copy of the LiveBot with
+risk / regime / spread caps tweaked for that pair's character (gold uses
+wider stops and a higher regime band; EURUSD has tighter spread caps than
+GBPUSD; etc).
+
+Launch all of them under one supervisor:
+
+```powershell
+python -m bot.live_multi --all
+```
+
+Or pick a subset:
+
+```powershell
+python -m bot.live_multi --pairs gbpusd,usdjpy,xauusd
+```
+
+The supervisor:
+
+- Spawns one `python -m bot.live --config <per-pair config>` subprocess per
+  pair (separate MT5 connection, separate ML model, separate paper-state
+  file, separate log)
+- Auto-restarts any child that exits unexpectedly (with a 10s backoff)
+- Holds a child out if it crashes more than 6 times in 60 minutes -- the
+  others keep running
+- Forwards Ctrl+C to every child for graceful shutdown
+
+Logs end up in `data/bot_<pair>.log` and `data/bot_multi.log`.
+
 ### Backtest
 
 ```powershell
