@@ -108,6 +108,64 @@ def test_intervention_warnings():
     print("[OK] intervention warnings")
 
 
+def test_priced_in_detection():
+    from bot.dashboard import _enrich_event
+    # Rate decision where forecast == previous => priced_in
+    raw = {
+        "title": "RBA Cash Rate",
+        "country": "AUD",
+        "date": "2026-05-26T04:30:00+00:00",
+        "impact": "High",
+        "forecast": "4.35%",
+        "previous": "4.35%",
+        "actual": None,
+    }
+    e = _enrich_event(raw)
+    assert e is not None
+    assert e["is_rate_decision"] is True, e
+    assert e["priced_in"] is True, e
+    # Same release with different numbers => not priced in
+    raw["forecast"] = "4.10%"
+    e2 = _enrich_event(raw)
+    assert e2["is_rate_decision"] is True
+    assert e2["priced_in"] is False
+    # Non-rate event should not flag rate-decision regardless of equality
+    raw_cpi = {
+        "title": "CPI y/y",
+        "country": "USD",
+        "date": "2026-05-26T12:30:00+00:00",
+        "impact": "High",
+        "forecast": "3.0%",
+        "previous": "3.0%",
+        "actual": None,
+    }
+    e3 = _enrich_event(raw_cpi)
+    assert e3["is_rate_decision"] is False
+    assert e3["priced_in"] is False
+    print("[OK] priced-in detection")
+
+
+def test_statement_tone_scanner():
+    from bot.dashboard import _scan_statement_tone
+    items = [
+        {"title": "RBA holds rates, signals more hikes if inflation persistent",
+         "summary": "Bullock said the board remains vigilant on inflation",
+         "source": "ForexLive",
+         "published_at": "2026-05-26T04:35:00+00:00"},
+        {"title": "RBA statement: hawkish tone surprises markets",
+         "summary": "Higher for longer guidance",
+         "source": "ActionForex",
+         "published_at": "2026-05-26T04:40:00+00:00"},
+        {"title": "Tech stocks rally", "summary": "unrelated",
+         "source": "MarketWatch",
+         "published_at": "2026-05-26T04:50:00+00:00"},
+    ]
+    out = _scan_statement_tone(items, "AUD", "2026-05-26T04:30:00+00:00")
+    assert out["tone"] == "hawkish", out
+    assert out["hawkish_hits"] >= 2, out
+    print("[OK] statement tone scanner")
+
+
 def main() -> int:
     test_parse_numbers()
     test_classify_higher_is_hawkish()
@@ -117,6 +175,8 @@ def main() -> int:
     test_mixed_detection()
     test_enrich_event()
     test_intervention_warnings()
+    test_priced_in_detection()
+    test_statement_tone_scanner()
     print("\nAll calendar tests passed.")
     return 0
 

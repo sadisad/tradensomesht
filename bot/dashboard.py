@@ -372,6 +372,21 @@ def _enrich_event(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     prev = _parse_ff_number(raw.get("previous"))
     act = _parse_ff_number(raw.get("actual"))
     cls = _classify_outcome(title, fc, prev, act)
+
+    # Rate-decision events have a special workflow per the WelcomeHomeTrading
+    # video: when the rate is "priced in" (forecast == previous) the actual
+    # number rarely moves price -- the *statement* does. We flag these so the
+    # frontend can surface a "watch the statement" scenario instead of the
+    # generic beat/miss template.
+    title_lower = title.lower()
+    is_rate_decision = any(k in title_lower for k in (
+        "rate decision", "policy rate", "official cash rate",
+        "interest rate decision", "bank rate", "cash rate",
+    ))
+    priced_in = False
+    if is_rate_decision and fc is not None and prev is not None:
+        priced_in = abs(fc - prev) < 1e-9
+
     return {
         "time": when.isoformat(),
         "ts": when.timestamp(),
@@ -387,6 +402,8 @@ def _enrich_event(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "outcome": cls["outcome"],
         "bias": cls["bias"],
         "delta_pct": cls["delta_pct"],
+        "is_rate_decision": is_rate_decision,
+        "priced_in": priced_in,
     }
 
 
@@ -473,6 +490,97 @@ def _intervention_warnings(symbol: str, last_price: Optional[float]) -> List[Dic
                        "this pair regardless of your fundamental thesis.",
         })
     return warnings
+
+
+# Hawkish keywords scanned in central-bank statements / news after a rate
+# decision. Per the video: when a rate is priced in, the *statement* drives
+# the move -- so we scan recent headlines/summaries for tone clues.
+_HAWKISH_STATEMENT_KW = (
+    "hawkish", "rate hike", "tighten", "tightening", "more hikes",
+    "above target", "upside risk to inflation", "inflation persistent",
+    "remain restrictive", "higher for longer", "raise rates",
+    "additional tightening", "vigilant on inflation",
+)
+_DOVISH_STATEMENT_KW = (
+    "dovish", "rate cut", "cut rates", "ease", "easing", "loosen",
+    "downside risk", "softer growth", "below target", "patient",
+    "no rush", "pause", "hold steady", "slowdown",
+    "balanced approach", "data dependent", "unchanged",
+)
+
+
+def _scan_statement_tone(news_items: List[Dict[str, Any]],
+                         currency: str,
+                         after_iso: Optional[str],
+                         window_minutes: int = 90) -> Dict[str, Any]:
+    """Look at news headlines published in the window after a rate decision
+    and tally hawkish vs dovish keyword hits. Used to classify the tone of
+    the central-bank statement when the rate itself prints as expected."""
+    out: Dict[str, Any] = {
+        "tone": "unknown",       # unknown | hawkish | dovish | mixed
+        "hawkish_hits": 0,
+        "dovish_hits": 0,
+        "samples": [],
+    }
+    if not after_iso or not news_items:
+        return out
+    try:
+        after_dt = datetime.fromisoformat(after_iso)
+    except ValueError:
+        return out
+    if after_dt.tzinfo is None:
+        after_dt = after_dt.replace(tzinfo=timezone.utc)
+    horizon = after_dt + timedelta(minutes=window_minutes)
+    cb_aliases = {
+        "USD": ("fed ", "federal reserve", "fomc", "powell"),
+        "EUR": ("ecb", "lagarde", "european central bank"),
+        "GBP": ("boe", "bank of england", "bailey"),
+        "JPY": ("boj", "bank of japan", "ueda"),
+        "AUD": ("rba", "reserve bank of australia", "bullock"),
+        "NZD": ("rbnz", "reserve bank of new zealand", "orr"),
+        "CAD": ("boc", "bank of canada", "macklem"),
+        "CHF": ("snb", "swiss national bank", "jordan"),
+    }.get(currency.upper(), ())
+    cb_aliases = cb_aliases + (currency.lower(),)
+
+    hawk = dove = 0
+    samples: List[Dict[str, Any]] = []
+    for it in news_items:
+        pub = it.get("published_at")
+        if not pub:
+            continue
+        try:
+            pub_dt = datetime.fromisoformat(pub)
+        except ValueError:
+            continue
+        if pub_dt.tzinfo is None:
+            pub_dt = pub_dt.replace(tzinfo=timezone.utc)
+        if pub_dt < after_dt or pub_dt > horizon:
+            continue
+        blob = (it.get("title", "") + " " + it.get("summary", "")).lower()
+        if cb_aliases and not any(a in blob for a in cb_aliases):
+            continue
+        h = sum(1 for k in _HAWKISH_STATEMENT_KW if k in blob)
+        d = sum(1 for k in _DOVISH_STATEMENT_KW if k in blob)
+        if h or d:
+            hawk += h
+            dove += d
+            samples.append({
+                "title": it.get("title", "")[:120],
+                "source": it.get("source", ""),
+                "hawkish_hits": h,
+                "dovish_hits": d,
+            })
+    out["hawkish_hits"] = hawk
+    out["dovish_hits"] = dove
+    out["samples"] = samples[:5]
+    if hawk > dove and hawk - dove >= 2:
+        out["tone"] = "hawkish"
+    elif dove > hawk and dove - hawk >= 2:
+        out["tone"] = "dovish"
+    elif hawk or dove:
+        out["tone"] = "mixed"
+    return out
 
 
 class _NewsCache:
@@ -1031,6 +1139,21 @@ def create_app(cfg: Dict[str, Any]) -> FastAPI:
         # Tag mixed-data conflicts (uses *all* same-currency results, not just
         # the filtered slice, so a mixed pair across impact tiers still flags)
         _detect_mixed(events)
+
+        # For *recently printed* rate decisions, scan the news cache to infer
+        # the statement tone. The video stresses that when the rate itself is
+        # priced in, the statement is what moves price -- so we surface that
+        # signal alongside the headline number.
+        news_snap = _NEWS_CACHE.get(force=False)
+        news_items = news_snap.get("items") or []
+        for e in events:
+            if not e.get("is_rate_decision"):
+                continue
+            if e["outcome"] == "pending":
+                continue
+            tone = _scan_statement_tone(news_items, e["currency"], e["time"])
+            e["statement_tone"] = tone["tone"]
+            e["statement_samples"] = tone["samples"]
 
         # Per-currency net bias from completed surprises
         bias_by_ccy: Dict[str, Dict[str, int]] = {}

@@ -81,6 +81,19 @@ trade_management:
   trail_distance_atr: 1.0   # trail SL at price - (this * ATR); only ratchets, never gives back
   max_bars: 0               # force-close if open for this many bars without resolving (0 = no time stop)
 
+  # ---- News-ride mode (WelcomeHomeTrading "Statement Trade" playbook) ------
+  # After a fundamental-driven entry runs to ``trigger_r`` R-multiples, close
+  # ``partial_pct`` of the position at market and pull the remaining SL to
+  # breakeven (+ breakeven_offset_atr). The runner is now risk-free and can
+  # ride continuation. Designed for one-shot moves around news prints.
+  #
+  # NOTE: only fires when this section is enabled. The trade_management
+  # section above must also be enabled for any rule (including this one) to run.
+  news_ride:
+    enabled: false
+    trigger_r: 1.0          # take partials once unrealised gain >= this R
+    partial_pct: 0.9        # fraction of original volume to close (0.9 = 90%)
+
 ml:
   enabled: true
   model_path: "models/ml_filter.joblib"

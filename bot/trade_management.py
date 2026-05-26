@@ -34,9 +34,11 @@ log = get_logger(__name__)
 @dataclass
 class ManagementAction:
     ticket: int
-    kind: str            # "breakeven", "trail", "time_stop"
+    kind: str            # "breakeven", "trail", "time_stop", "partial_close"
     new_sl: Optional[float]
     note: str
+    close_volume: Optional[float] = None     # for partial_close: lots to close
+    set_breakeven: bool = False              # for partial_close: also pull SL to BE
 
 
 @dataclass
@@ -52,9 +54,11 @@ class ManagedPosition:
     current_sl: float
     current_tp: float
     original_sl_distance: float
+    original_volume: float
     atr: float
     opened_at: datetime
     bars_open: int = 0
+    partial_taken: bool = False     # set once news_ride has fired
 
 
 class TradeManager:
@@ -66,6 +70,14 @@ class TradeManager:
         self.trail_start_r: float = float(self.cfg.get("trail_start_r", 0) or 0)
         self.trail_distance_atr: float = float(self.cfg.get("trail_distance_atr", 0) or 0)
         self.max_bars: int = int(self.cfg.get("max_bars", 0) or 0)
+
+        # ---- News-ride mode (per WelcomeHomeTrading "Statement Trade" video):
+        # after a fundamental-driven entry pops to a target R, take 90% off and
+        # leave the rest with SL pulled to breakeven so it costs nothing to hold.
+        ride_cfg = self.cfg.get("news_ride", {}) or {}
+        self.ride_enabled: bool = bool(ride_cfg.get("enabled", False))
+        self.ride_trigger_r: float = float(ride_cfg.get("trigger_r", 1.0) or 0.0)
+        self.ride_partial_pct: float = float(ride_cfg.get("partial_pct", 0.9) or 0.0)
 
     # ------------------------------------------------------------------
     def evaluate(
@@ -97,6 +109,29 @@ class TradeManager:
         else:
             gain = position.entry - current_price
         r_mult = gain / position.original_sl_distance
+
+        # ---- News-ride: take 90% off at trigger_r, pull SL to breakeven on
+        # the runner. Per the WelcomeHomeTrading video this locks in the bulk
+        # of the move while leaving room to capture continuation. Fires once.
+        if (self.ride_enabled and not position.partial_taken
+                and self.ride_trigger_r > 0 and r_mult >= self.ride_trigger_r
+                and 0.0 < self.ride_partial_pct < 1.0
+                and position.original_volume > 0):
+            close_vol = round(position.original_volume * self.ride_partial_pct, 2)
+            if close_vol >= 0.01 and close_vol < position.original_volume:
+                offset = self.breakeven_offset_atr * position.atr
+                if position.side == "buy":
+                    be_sl = position.entry + offset
+                else:
+                    be_sl = position.entry - offset
+                return ManagementAction(
+                    ticket=position.ticket,
+                    kind="partial_close",
+                    new_sl=round(float(be_sl), 5),
+                    note=f"news_ride r_mult={r_mult:.2f} close_pct={self.ride_partial_pct*100:.0f}",
+                    close_volume=close_vol,
+                    set_breakeven=True,
+                )
 
         proposed_sl: Optional[float] = None
         kind: Optional[str] = None

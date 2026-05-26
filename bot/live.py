@@ -90,6 +90,10 @@ class LiveBot:
         # without clobbering each other's state.
         self._paper_positions: Dict[int, Dict[str, Any]] = {}
         self._paper_next_ticket: int = 9_000_000_000
+        # In-memory record of which tickets have already had a news_ride
+        # partial close fired against them. Mirrors the paper-side flag in
+        # ``_paper_positions[ticket]["partial_taken"]`` for demo mode.
+        self._partials_taken: Dict[int, bool] = {}
         _safe_symbol = "".join(c if c.isalnum() else "_" for c in self.symbol).lower()
         self._paper_state_path: Path = Path(self.journal_cfg["db_path"]).with_name(
             f"paper_positions_{_safe_symbol}.json"
@@ -353,11 +357,13 @@ class LiveBot:
             "sl": plan.sl,
             "tp": plan.tp,
             "volume": plan.volume,
+            "original_volume": float(plan.volume),
             "opened_at": opened_at.isoformat(),
             "atr": sig.atr,
             "original_sl_distance": float(plan.sl_distance),
             "bars_open": 0,
             "last_seen_bar": None,
+            "partial_taken": False,
         }
         self._save_paper_state()
         self.journal.record_open(
@@ -412,9 +418,11 @@ class LiveBot:
                 current_sl=float(pos["sl"]),
                 current_tp=float(pos["tp"]),
                 original_sl_distance=float(pos.get("original_sl_distance") or abs(pos["entry"] - pos["sl"])),
+                original_volume=float(pos.get("original_volume") or pos.get("volume", 0.0)),
                 atr=float(pos.get("atr") or cur_atr or 0.0),
                 opened_at=opened_ts.to_pydatetime(),
                 bars_open=int(pos.get("bars_open", 0)),
+                partial_taken=bool(pos.get("partial_taken", False)),
             )
             action = self.trade_manager.evaluate(mp, current_price=ref_price)
             if action is None:
@@ -441,6 +449,38 @@ class LiveBot:
                 )
                 self._paper_positions.pop(ticket, None)
                 changed = True
+            elif action.kind == "partial_close":
+                # News-ride: shrink the position and pull SL to breakeven on
+                # the runner. We realise the partial PnL into the journal as a
+                # close-event with the same ticket marker so PnL accounting
+                # stays consistent.
+                if action.close_volume and action.close_volume < pos["volume"]:
+                    try:
+                        sym_info = self.client.symbol_info(self.symbol)
+                        contract = float(getattr(sym_info, "trade_contract_size", 1.0)) or 1.0
+                    except Exception:  # noqa: BLE001
+                        contract = 1.0
+                    realised_price = (ref_price - mp.entry) if mp.side == "buy" else (mp.entry - ref_price)
+                    realised_money = realised_price * float(action.close_volume) * contract
+                    self.journal.record_partial(
+                        ticket=ticket,
+                        closed_at=datetime.now(tz=timezone.utc),
+                        close_price=float(ref_price),
+                        close_reason="news_ride_partial",
+                        pnl=float(realised_money),
+                        volume=float(action.close_volume),
+                    )
+                    pos["volume"] = round(pos["volume"] - float(action.close_volume), 2)
+                    if action.new_sl is not None:
+                        pos["sl"] = float(action.new_sl)
+                    pos["partial_taken"] = True
+                    self._partials_taken[ticket] = True
+                    changed = True
+                    log.info(
+                        "[paper] news_ride ticket=%s partial=%.2f remaining=%.2f sl->%.5f (%s)",
+                        ticket, action.close_volume, pos["volume"],
+                        pos["sl"], action.note,
+                    )
             elif action.new_sl is not None:
                 pos["sl"] = float(action.new_sl)
                 changed = True
@@ -469,9 +509,11 @@ class LiveBot:
                 current_sl=float(p.sl),
                 current_tp=float(p.tp),
                 original_sl_distance=float(original_sl_dist),
+                original_volume=float(p.volume),
                 atr=float(cur_atr or 0.0),
                 opened_at=opened_at,
                 bars_open=self._bars_since_open(opened_at),
+                partial_taken=self._partials_taken.get(int(p.ticket), False),
             )
             action = self.trade_manager.evaluate(mp, current_price=ref_price)
             if action is None:
@@ -482,6 +524,30 @@ class LiveBot:
                     log.info("[demo] time_stop close ticket=%s (%s)", p.ticket, action.note)
                 else:
                     log.warning("[demo] time_stop close failed ticket=%s retcode=%s", p.ticket, res.retcode)
+            elif action.kind == "partial_close":
+                # News-ride: send a partial close (close_volume) and modify SL
+                # to breakeven on the remainder. The broker will track the
+                # remaining lot under the same ticket on most MT5 brokers.
+                if action.close_volume and action.close_volume < float(p.volume):
+                    res = self.client.close_position(p, volume=float(action.close_volume))
+                    if res.ok:
+                        log.info(
+                            "[demo] news_ride ticket=%s partial=%.2f (%s)",
+                            p.ticket, action.close_volume, action.note,
+                        )
+                        if action.new_sl is not None:
+                            mres = self.client.modify_position_sltp(p, sl=action.new_sl)
+                            if mres.ok:
+                                log.info(
+                                    "[demo] news_ride ticket=%s sl->%.5f (BE)",
+                                    p.ticket, action.new_sl,
+                                )
+                        self._partials_taken[int(p.ticket)] = True
+                    else:
+                        log.warning(
+                            "[demo] news_ride partial-close failed ticket=%s retcode=%s",
+                            p.ticket, res.retcode,
+                        )
             elif action.new_sl is not None:
                 res = self.client.modify_position_sltp(p, sl=action.new_sl)
                 if res.ok:

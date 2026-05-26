@@ -244,14 +244,21 @@ class MT5Client:
             comment=str(result.comment),
         )
 
-    def close_position(self, position: Position, deviation: int = 20) -> OrderResult:
+    def close_position(self, position: Position, deviation: int = 20,
+                       volume: Optional[float] = None) -> OrderResult:
+        """Close a position. ``volume`` defaults to the full position size; pass
+        a smaller value for a partial close (used by news_ride trade management
+        to take 90% off and let the remainder ride at breakeven)."""
         opp_side = "sell" if position.side == "buy" else "buy"
         order_type = mt5.ORDER_TYPE_SELL if position.side == "buy" else mt5.ORDER_TYPE_BUY
         price = self.current_price(position.symbol, opp_side)
+        close_vol = float(volume) if volume is not None else float(position.volume)
+        # Clamp: never request more than the open size, never less than min lot.
+        close_vol = max(0.01, min(close_vol, float(position.volume)))
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": position.symbol,
-            "volume": float(position.volume),
+            "volume": close_vol,
             "type": order_type,
             "position": int(position.ticket),
             "price": price,

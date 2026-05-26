@@ -425,6 +425,12 @@
 
   function outcomePill(e) {
     if (e.mixed) return `<span class="pill mixed" title="Mixed data on the same currency">MIXED</span>`;
+    if (e.priced_in && e.outcome === "pending") {
+      return `<span class="pill priced-in" title="Rate change matches previous -- statement drives price">PRICED IN</span>`;
+    }
+    if (e.statement_tone === "hawkish") return `<span class="pill beat" title="Hawkish statement scanned from news">HAWKISH STMT</span>`;
+    if (e.statement_tone === "dovish")  return `<span class="pill miss" title="Dovish statement scanned from news">DOVISH STMT</span>`;
+    if (e.statement_tone === "mixed")   return `<span class="pill mixed" title="Statement keywords mixed">MIXED STMT</span>`;
     if (e.outcome === "beat")   return `<span class="pill beat">BEAT</span>`;
     if (e.outcome === "miss")   return `<span class="pill miss">MISS</span>`;
     if (e.outcome === "inline") return `<span class="pill inline">INLINE</span>`;
@@ -444,10 +450,56 @@
       return;
     }
     const ms = (e.ts * 1000) - Date.now();
-    const direction = _direction(e.title);
     const ccy = e.currency;
     const fc = e.forecast || "--";
     const prev = e.previous || "--";
+
+    // Branch: priced-in rate decision -> the *statement* is the trade, not the
+    // headline number. Per the WelcomeHomeTrading video on RBA: forecast ==
+    // previous means the move comes from tone, not the rate itself.
+    if (e.is_rate_decision && e.priced_in) {
+      body.innerHTML = `
+        <div class="plan-headline">
+          <span class="plan-ccy">${ccy}</span>
+          <span class="plan-title">${escapeHTML(e.title)}</span>
+          ${impactBadge(e.impact)}
+          <span class="pill priced-in">PRICED IN</span>
+        </div>
+        <div class="plan-meta">
+          <span class="plan-when" data-plan-ts="${e.ts}">${fmtCountdown(ms)}</span>
+          <span class="muted">${fmtClock(e.time)}</span>
+          <span class="muted">forecast ${escapeHTML(fc)} == previous ${escapeHTML(prev)}</span>
+        </div>
+        <p class="plan-lean">
+          Rate decision is <strong>already priced in</strong>. The statement
+          tone &mdash; not the number &mdash; will move price.
+        </p>
+        <div class="plan-scenarios">
+          <div class="plan-scen scen-up">
+            <span class="scen-tag">If statement is hawkish</span>
+            <p>${ccy} likely <strong>strengthens</strong>. Wait for break-of-structure
+               on the chart, then enter pro-${ccy}. Take 90% off at first
+               liquidity / TP1, trail the rest at breakeven.</p>
+          </div>
+          <div class="plan-scen scen-down">
+            <span class="scen-tag">If statement is dovish</span>
+            <p>${ccy} likely <strong>weakens</strong>. Same playbook, opposite
+               direction. Use the chop after the headline to identify the
+               break.</p>
+          </div>
+          <div class="plan-scen scen-mixed">
+            <span class="scen-tag">If tone is balanced</span>
+            <p><strong>Stand aside.</strong> No fundamental edge means no
+               trade &mdash; protect capital for the next setup.</p>
+          </div>
+        </div>
+      `;
+      if (sub) sub.textContent = `for ${data.symbol} | ${ccy} | rate decision`;
+      return;
+    }
+
+    // Default branch: surprise-driven event (CPI, NFP, GDP, etc).
+    const direction = _direction(e.title);
     const lean = e.bias === "hawkish"
       ? `Forecast leans <span class="hawk">hawkish</span> for ${ccy}`
       : e.bias === "dovish"

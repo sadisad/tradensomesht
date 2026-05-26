@@ -184,6 +184,64 @@ class Journal:
                  float(pnl), outcome, int(ticket)),
             )
 
+    def record_partial(
+        self,
+        ticket: int,
+        *,
+        closed_at: datetime,
+        close_price: float,
+        close_reason: str,
+        pnl: float,
+        volume: float,
+    ) -> None:
+        """Record a partial close as a *new* synthetic trade row so the parent
+        position can stay open with reduced size. The synthetic row uses a
+        negative ticket derived from the parent so:
+          - PnL stats and equity curve include the realised partial PnL
+          - The parent ticket remains visible as 'open' for the runner
+          - Re-running record_partial on the same ticket produces unique rows
+            (we suffix the row id by the partial sequence count).
+        """
+        # Determine the next partial sequence for this parent ticket.
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT COUNT(*) AS n FROM trades "
+                "  WHERE ticket < 0 AND symbol = (SELECT symbol FROM trades WHERE ticket = ?)"
+                "    AND reason = ?",
+                (int(ticket), f"partial_of_{ticket}"),
+            ).fetchone()
+            seq = int(row["n"] or 0) + 1
+            partial_ticket = -(int(ticket) * 100 + seq)
+            parent = c.execute(
+                "SELECT symbol, side, entry_price, sl, tp, atr, risk_money, "
+                "       risk_pct, opened_at, magic "
+                "  FROM trades WHERE ticket = ?",
+                (int(ticket),),
+            ).fetchone()
+            if parent is None:
+                return
+            outcome = 1 if pnl > 0 else 0
+            c.execute(
+                """
+                INSERT INTO trades (
+                    ticket, symbol, side, volume, entry_price, sl, tp, atr,
+                    risk_money, risk_pct, reason, features_json,
+                    opened_at, closed_at, close_price, close_reason,
+                    pnl, outcome, magic
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    partial_ticket,
+                    parent["symbol"], parent["side"], float(volume),
+                    parent["entry_price"], parent["sl"], parent["tp"],
+                    parent["atr"], parent["risk_money"], parent["risk_pct"],
+                    f"partial_of_{ticket}", None,
+                    parent["opened_at"], _iso(closed_at),
+                    float(close_price), close_reason,
+                    float(pnl), outcome, parent["magic"],
+                ),
+            )
+
     # ------------------------------------------------------------------ queries
     def open_tickets(self, symbol: Optional[str] = None) -> List[int]:
         sql = "SELECT ticket FROM trades WHERE closed_at IS NULL"
