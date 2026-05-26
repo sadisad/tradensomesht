@@ -27,6 +27,14 @@
     : null) || "";
   let knownSymbols = [];
 
+  // Currently-selected timeframe. ``""`` = use the bot's configured default
+  // (whatever ``cfg.trading.timeframe`` resolves to on the backend). When the
+  // user picks a TF in the topbar we override it for chart queries only --
+  // the bot itself keeps trading its configured TF.
+  let currentTimeframe = (typeof localStorage !== "undefined"
+    ? localStorage.getItem("rt:tf")
+    : null) || "";
+
   // ---- Theme: pull live values from CSS so charts match the rest of the UI.
   // Reading them once at boot is fine because the theme is static per page load.
   const css = getComputedStyle(document.documentElement);
@@ -74,6 +82,15 @@
     return `${url}${sep}symbol=${encodeURIComponent(currentSymbol)}`;
   }
 
+  /** Append the currently-selected timeframe override (if any). The chart
+   *  endpoint already falls back to the bot's configured TF when this param
+   *  is omitted, so empty currentTimeframe means 'use the default'. */
+  function withTimeframe(url) {
+    if (!currentTimeframe) return url;
+    const sep = url.includes("?") ? "&" : "?";
+    return `${url}${sep}timeframe=${encodeURIComponent(currentTimeframe)}`;
+  }
+
   // ----------------------------------------------------------------- chart
   function ensureChart() {
     if (chart) return;
@@ -97,7 +114,7 @@
   async function loadCandlesFull() {
     ensureChart();
     try {
-      const data = await getJSON(withSymbol("/api/candles?bars=500"));
+      const data = await getJSON(withTimeframe(withSymbol("/api/candles?bars=500")));
       if (data.error) {
         setText("chart-sub", `chart unavailable: ${data.error}`);
         return;
@@ -118,7 +135,7 @@
   async function refreshLastCandle() {
     if (!candleSeries) return;
     try {
-      const data = await getJSON(withSymbol("/api/candles?bars=2"));
+      const data = await getJSON(withTimeframe(withSymbol("/api/candles?bars=2")));
       if (!data.candles || !data.candles.length) return;
       data.candles.forEach((c) => {
         if (c.time >= lastCandleTime) {
@@ -704,6 +721,51 @@
     });
   }
 
+  // ----------------------------------------------------------------- timeframe picker
+  function _reloadChartForTimeframe() {
+    if (chart && candleSeries) {
+      chart.removeSeries(candleSeries);
+      candleSeries = chart.addCandlestickSeries({
+        upColor: theme.win, downColor: theme.loss,
+        borderUpColor: theme.win, borderDownColor: theme.loss,
+        wickUpColor: theme.win, wickDownColor: theme.loss,
+      });
+    }
+    lastCandleTime = 0;
+    loadCandlesFull();
+  }
+
+  async function initTimeframePicker() {
+    const buttons = Array.from(document.querySelectorAll(".seg-btn[data-tf]"));
+    if (!buttons.length) return;
+
+    // First: figure out the default TF from /api/status so the highlight
+    // matches the bot's actual configured timeframe on first paint. The
+    // user's localStorage choice always wins over the default.
+    let defaultTf = "M5";
+    try {
+      const s = await getJSON(withSymbol("/api/status"));
+      if (s && s.timeframe) defaultTf = s.timeframe;
+    } catch (_) { /* fall back to M5 */ }
+    if (!currentTimeframe) currentTimeframe = defaultTf;
+
+    const setActive = (tf) => {
+      buttons.forEach((b) => b.classList.toggle("is-active", b.dataset.tf === tf));
+    };
+    setActive(currentTimeframe);
+
+    buttons.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const tf = btn.dataset.tf;
+        if (!tf || tf === currentTimeframe) return;
+        currentTimeframe = tf;
+        try { localStorage.setItem("rt:tf", currentTimeframe); } catch (_) {}
+        setActive(tf);
+        _reloadChartForTimeframe();
+      });
+    });
+  }
+
   // ----------------------------------------------------------------- symbol picker
   /** Read ``?symbols=A,B,C`` (or hash equivalent) from the page URL. Lets you
    * pin pairs into the picker that haven't traded yet (useful while waiting for
@@ -821,6 +883,7 @@
     initNewsControls();
     initCalendarControls();
     await initSymbolPicker();
+    await initTimeframePicker();
     loadCandlesFull();
     refreshNews(false);
     refreshCalendar(false);
