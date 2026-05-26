@@ -1203,6 +1203,53 @@ def create_app(cfg: Dict[str, Any]) -> FastAPI:
             "error": snap["error"],
         }
 
+    @app.get("/api/ml_status")
+    def api_ml_status(symbol: Optional[str] = None):
+        """Surface the ML filter's training state so the dashboard can show
+        what the bot has 'learned'. Reads the persisted model file directly
+        rather than holding a MLFilter instance -- the live loop owns the
+        live model, this is a read-only inspector."""
+        from .ml_filter import MLFilter as _MLFilter
+        from .indicators import FEATURE_COLUMNS as _FEATS
+        ml_cfg = cfg.get("ml", {}) or {}
+        filt = _MLFilter(ml_cfg)
+        out = filt.status()
+        # Add per-symbol journal stats (closed trade count = "experience")
+        sym = _resolve_symbol(symbol, "") or None
+        try:
+            with _db() as c:
+                where = " WHERE outcome IS NOT NULL"
+                params: tuple = ()
+                if sym:
+                    where += " AND symbol = ?"
+                    params = (sym,)
+                row = c.execute(
+                    "SELECT COUNT(*) AS n,"
+                    "       SUM(CASE WHEN outcome=1 THEN 1 ELSE 0 END) AS wins,"
+                    "       MAX(closed_at) AS last_closed_at"
+                    "  FROM trades" + where, params,
+                ).fetchone()
+                out["closed_trades"] = int(row["n"] or 0)
+                out["wins"] = int(row["wins"] or 0)
+                out["losses"] = out["closed_trades"] - out["wins"]
+                out["last_closed_at"] = row["last_closed_at"]
+                # How many trades since last retrain
+                out["trades_since_retrain"] = max(
+                    0, out["closed_trades"] - int(out.get("trained_at_count") or 0)
+                )
+                # Progress to next retrain
+                retrain_every = int(out.get("retrain_every") or 25)
+                out["retrain_in"] = max(0, retrain_every - out["trades_since_retrain"])
+                # Bootstrap progress (toward min_train_samples)
+                min_n = int(out.get("min_train_samples") or 100)
+                out["bootstrap_progress"] = min(1.0, out["closed_trades"] / max(1, min_n))
+        except Exception as e:  # noqa: BLE001
+            out["journal_error"] = str(e)
+        # Reflect *current* feature schema so the UI can show what the bot is
+        # learning today even if the saved model is stale.
+        out["live_feature_columns"] = list(_FEATS)
+        return out
+
     return app
 
 

@@ -66,8 +66,21 @@ class MLFilter:
             try:
                 payload = joblib.load(self.model_path)
                 self.model = payload["model"]
+                # Use the schema the model was trained on -- not the current
+                # FEATURE_COLUMNS -- so predict_proba feeds the right shape.
+                # If the bot's feature set has since grown, ``maybe_retrain``
+                # will rebuild on the new schema once enough trades accrue.
                 self.feature_columns = list(payload.get("features", FEATURE_COLUMNS))
                 self._last_trained_at_count = int(payload.get("trained_at_count", 0))
+                # Detect schema drift so the live loop can flag it.
+                self._schema_drift = (set(self.feature_columns) != set(FEATURE_COLUMNS))
+                if self._schema_drift:
+                    log.warning(
+                        "ML model trained on a different feature schema "
+                        "(model has %d cols, current build has %d). "
+                        "Predictions still work; will retrain on next cycle.",
+                        len(self.feature_columns), len(FEATURE_COLUMNS),
+                    )
                 log.info(
                     "ML model loaded from %s (trained at %d samples)",
                     self.model_path, self._last_trained_at_count,
@@ -75,6 +88,9 @@ class MLFilter:
             except Exception as e:  # noqa: BLE001
                 log.warning("Failed to load ML model: %s. Will retrain when ready.", e)
                 self.model = None
+                self._schema_drift = False
+        else:
+            self._schema_drift = False
 
     def _save(self, report: TrainReport) -> None:
         self.model_path.parent.mkdir(parents=True, exist_ok=True)
@@ -109,6 +125,33 @@ class MLFilter:
             return True
         return proba >= self.min_proba
 
+    def status(self) -> Dict[str, Any]:
+        """Expose current model state for the dashboard. Reads the saved
+        report (if any) from the model file so the live loop doesn't need to
+        keep it in memory."""
+        out: Dict[str, Any] = {
+            "enabled": self.enabled,
+            "loaded": self.model is not None,
+            "min_proba": self.min_proba,
+            "min_train_samples": self.min_train_samples,
+            "retrain_every": self.retrain_every,
+            "trained_at_count": self._last_trained_at_count,
+            "feature_columns": list(self.feature_columns),
+            "n_features_current": len(FEATURE_COLUMNS),
+            "schema_drift": bool(self._schema_drift),
+            "model_path": str(self.model_path),
+            "report": None,
+        }
+        if self.model_path.exists():
+            try:
+                payload = joblib.load(self.model_path)
+                rep = payload.get("report")
+                if isinstance(rep, dict):
+                    out["report"] = rep
+            except Exception:  # noqa: BLE001
+                pass
+        return out
+
     # ------------------------------------------------------------------ training
     def maybe_retrain(self, journal, symbol: Optional[str] = None) -> Optional[TrainReport]:
         if not self.enabled:
@@ -116,8 +159,16 @@ class MLFilter:
         n_closed = journal.closed_count(symbol=symbol)
         if n_closed < self.min_train_samples:
             return None
-        if n_closed - self._last_trained_at_count < self.retrain_every and self.model is not None:
+        # Force retrain if the schema drifted (we added/removed features) so
+        # the live model uses the latest feature set as soon as we have data.
+        if self._schema_drift and n_closed >= self.min_train_samples:
+            log.info("ML schema drift detected -- forcing retrain on new features")
+        elif n_closed - self._last_trained_at_count < self.retrain_every and self.model is not None:
             return None
+        # On retrain, snap to the live FEATURE_COLUMNS list so the model
+        # learns the latest features.
+        self.feature_columns = list(FEATURE_COLUMNS)
+        self._schema_drift = False
         return self.retrain(journal, symbol=symbol)
 
     def retrain(self, journal, symbol: Optional[str] = None) -> Optional[TrainReport]:

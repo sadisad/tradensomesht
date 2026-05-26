@@ -87,6 +87,24 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     out["range_pct"] = (df["high"] - df["low"]) / df["close"]
     out["body_pct"] = (df["close"] - df["open"]) / df["close"]
 
+    # Wick ratio (rejection candles tend to mark turning points; lets the model
+    # learn whether it's entering on a clean breakout or chasing a wick).
+    body_abs = (df["close"] - df["open"]).abs()
+    upper_wick = df["high"] - df[["close", "open"]].max(axis=1)
+    lower_wick = df[["close", "open"]].min(axis=1) - df["low"]
+    rng = (df["high"] - df["low"]).replace(0.0, np.nan)
+    out["upper_wick_ratio"] = upper_wick / rng
+    out["lower_wick_ratio"] = lower_wick / rng
+    out["body_to_range"] = body_abs / rng
+
+    # Distance from recent extremes (40-bar window). Trades launched right at
+    # local highs / lows behave differently from mid-range trades.
+    look = 40
+    rolling_high = df["high"].rolling(look, min_periods=10).max()
+    rolling_low = df["low"].rolling(look, min_periods=10).min()
+    out["dist_to_high_pct"] = (rolling_high - df["close"]) / df["close"]
+    out["dist_to_low_pct"]  = (df["close"] - rolling_low) / df["close"]
+
     # Volume features (tick volume on FX, but still useful)
     vol = df["volume"].astype(float)
     vol_ma = vol.rolling(20, min_periods=5).mean()
@@ -98,6 +116,13 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
         out["tod_sin"] = np.sin(2 * np.pi * hour / 24.0)
         out["tod_cos"] = np.cos(2 * np.pi * hour / 24.0)
         out["dow"] = df.index.dayofweek.astype(float) / 6.0
+        # Major FX session flags (UTC). One-hot keeps the model from having to
+        # decode the cyclic encoding for the use-cases that matter most.
+        h = df.index.hour
+        out["sess_asia"]   = ((h >= 0)  & (h < 8)).astype(float)
+        out["sess_london"] = ((h >= 7)  & (h < 16)).astype(float)
+        out["sess_ny"]     = ((h >= 12) & (h < 21)).astype(float)
+        out["sess_overlap_lon_ny"] = ((h >= 12) & (h < 16)).astype(float)
 
     return out.replace([np.inf, -np.inf], np.nan)
 
@@ -107,6 +132,9 @@ FEATURE_COLUMNS = [
     "ema_fast_slope", "ema_slow_slope", "ema_fast_minus_slow", "price_minus_trend",
     "rsi", "rsi_chg",
     "atr_pct", "range_pct", "body_pct",
+    "upper_wick_ratio", "lower_wick_ratio", "body_to_range",
+    "dist_to_high_pct", "dist_to_low_pct",
     "vol_ratio",
     "tod_sin", "tod_cos", "dow",
+    "sess_asia", "sess_london", "sess_ny", "sess_overlap_lon_ny",
 ]

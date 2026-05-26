@@ -6,6 +6,7 @@
   const CHART_REFRESH_MS = 15000;
   const NEWS_REFRESH_MS = 120000;
   const CALENDAR_REFRESH_MS = 60000;
+  const BRAIN_REFRESH_MS = 30000;
   const COUNTDOWN_MS = 1000;
 
   let chart = null;
@@ -16,6 +17,7 @@
   let lastChartLoad = 0;
   let lastNewsLoad = 0;
   let lastCalendarLoad = 0;
+  let lastBrainLoad = 0;
   let calendarImpact = "High,Medium";
   let lastCalendarData = null;
   let newsTag = "";
@@ -821,6 +823,7 @@
         lastCandleTime = 0;
         loadCandlesFull();
         refreshCalendar(false);
+        refreshBrain();
         tick();
       });
       // Re-poll the symbol list periodically so newly-active pairs appear
@@ -849,6 +852,105 @@
     }
   }
 
+  // ----------------------------------------------------------------- bot brain (ML filter status)
+  function renderBrain(s) {
+    const body = document.getElementById("brain-body");
+    const sub = document.getElementById("brain-sub");
+    if (!body) return;
+
+    // Top-line: bootstrapping vs trained vs disabled
+    const stateLabel = !s.enabled ? "Disabled"
+                     : !s.loaded  ? "Bootstrapping"
+                     : s.schema_drift ? "Retraining soon (new features)"
+                     : "Active";
+    const stateClass = !s.enabled ? "neutral"
+                     : !s.loaded  ? "dove"
+                     : s.schema_drift ? "warn"
+                     : "hawk";
+
+    const rep = s.report || {};
+    const trades = s.closed_trades || 0;
+    const wins = s.wins || 0;
+    const losses = s.losses || 0;
+    const wr = trades ? (wins / trades * 100) : 0;
+    const minN = s.min_train_samples || 100;
+    const bootPct = Math.round((s.bootstrap_progress || 0) * 100);
+
+    body.innerHTML = `
+      <div class="brain-grid">
+        <div class="brain-stat">
+          <span class="brain-label">Status</span>
+          <span class="brain-value">
+            <span class="bias-tag ${stateClass}">${stateLabel}</span>
+          </span>
+        </div>
+        <div class="brain-stat">
+          <span class="brain-label">Closed trades</span>
+          <span class="brain-value mono">${trades}</span>
+          <span class="muted">${wins}W / ${losses}L &middot; ${wr.toFixed(1)}% WR</span>
+        </div>
+        <div class="brain-stat">
+          <span class="brain-label">Trained at</span>
+          <span class="brain-value mono">${s.trained_at_count || 0} samples</span>
+          <span class="muted">${rep.n_features || s.feature_columns?.length || 0} features</span>
+        </div>
+        <div class="brain-stat">
+          <span class="brain-label">Min proba to act</span>
+          <span class="brain-value mono">${(s.min_proba * 100).toFixed(0)}%</span>
+        </div>
+        <div class="brain-stat">
+          <span class="brain-label">CV AUC</span>
+          <span class="brain-value mono">${rep.cv_auc != null ? rep.cv_auc.toFixed(3) : "--"}</span>
+          <span class="muted">${rep.cv_auc != null && rep.cv_auc > 0.55 ? "edge detected" : "no edge yet"}</span>
+        </div>
+        <div class="brain-stat">
+          <span class="brain-label">CV accuracy</span>
+          <span class="brain-value mono">${rep.cv_acc != null ? (rep.cv_acc * 100).toFixed(1) + "%" : "--"}</span>
+        </div>
+      </div>
+
+      <div class="brain-progress">
+        ${s.loaded ? `
+          <div class="prog-row">
+            <span class="prog-label">Next retrain in</span>
+            <div class="prog-bar"><div class="prog-fill" style="width:${100 * (1 - (s.retrain_in || 0) / (s.retrain_every || 25))}%"></div></div>
+            <span class="prog-meta">${s.retrain_in || 0} trades to go (every ${s.retrain_every || 25})</span>
+          </div>
+        ` : `
+          <div class="prog-row">
+            <span class="prog-label">Bootstrap progress</span>
+            <div class="prog-bar"><div class="prog-fill" style="width:${bootPct}%"></div></div>
+            <span class="prog-meta">${trades} of ${minN} trades collected</span>
+          </div>
+        `}
+      </div>
+
+      ${s.schema_drift ? `
+        <p class="brain-note">
+          New features were added since the last train. The bot is still
+          using the old model for predictions; it will retrain to the new
+          feature set on the next eligible cycle.
+        </p>
+      ` : ""}
+    `;
+
+    if (sub) {
+      sub.textContent = s.last_closed_at
+        ? `last closed: ${fmtAge(s.last_closed_at)}`
+        : "no closed trades yet";
+    }
+  }
+
+  async function refreshBrain() {
+    try {
+      const data = await getJSON(withSymbol("/api/ml_status"));
+      renderBrain(data);
+    } catch (e) {
+      const sub = document.getElementById("brain-sub");
+      if (sub) sub.textContent = `brain error: ${e.message}`;
+    }
+  }
+
   // ----------------------------------------------------------------- main loop
   async function tick() {
     await Promise.all([
@@ -873,6 +975,10 @@
     if (Date.now() - lastCalendarLoad > CALENDAR_REFRESH_MS) {
       refreshCalendar(false);
     }
+    if (Date.now() - lastBrainLoad > BRAIN_REFRESH_MS) {
+      refreshBrain();
+      lastBrainLoad = Date.now();
+    }
     setText("last-update", new Date().toISOString().replace("T", " ").slice(11, 19) + "Z");
   }
 
@@ -887,6 +993,7 @@
     loadCandlesFull();
     refreshNews(false);
     refreshCalendar(false);
+    refreshBrain();
     tick();
     setInterval(tick, REFRESH_MS);
     setInterval(tickCountdowns, COUNTDOWN_MS);
