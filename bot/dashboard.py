@@ -126,7 +126,7 @@ def create_app(cfg: Dict[str, Any]) -> FastAPI:
     STATE.cfg = cfg
     STATE.db_path = Path(cfg.get("journal", {}).get("db_path", "data/journal.db"))
 
-    app = FastAPI(title="Robot Trading Dashboard", version="0.1.0")
+    app = FastAPI(title="Axiom Omega Dashboard", version="0.1.0")
     static_dir = Path(__file__).resolve().parent / "static"
     static_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
@@ -395,7 +395,7 @@ def create_app(cfg: Dict[str, Any]) -> FastAPI:
             markers.append({
                 "time": t_in,
                 "position": "belowBar" if r["side"] == "buy" else "aboveBar",
-                "color": "#0d8a6e" if r["side"] == "buy" else "#b8423a",
+                "color": "#2F6F4E" if r["side"] == "buy" else "#B8423A",
                 "shape": "arrowUp" if r["side"] == "buy" else "arrowDown",
                 "text": f"{r['side']} #{r['ticket']}",
             })
@@ -404,7 +404,7 @@ def create_app(cfg: Dict[str, Any]) -> FastAPI:
                     t_out = int(datetime.fromisoformat(r["closed_at"]).timestamp())
                 except Exception:  # noqa: BLE001
                     continue
-                outcome_color = "#0d8a6e" if r["outcome"] == 1 else "#b8423a"
+                outcome_color = "#2F6F4E" if r["outcome"] == 1 else "#B8423A"
                 markers.append({
                     "time": t_out,
                     "position": "aboveBar" if r["side"] == "buy" else "belowBar",
@@ -421,7 +421,7 @@ def create_app(cfg: Dict[str, Any]) -> FastAPI:
 
 # ---------------------------------------------------------------------- entrypoint
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Robot Trading dashboard")
+    parser = argparse.ArgumentParser(description="Axiom Omega dashboard")
     parser.add_argument("--config", default=None)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)

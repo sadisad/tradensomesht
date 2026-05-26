@@ -1,4 +1,4 @@
-/* Robot Trading dashboard - vanilla JS */
+/* Axiom Omega dashboard - vanilla JS */
 (function () {
   "use strict";
 
@@ -23,13 +23,13 @@
   // Reading them once at boot is fine because the theme is static per page load.
   const css = getComputedStyle(document.documentElement);
   const theme = {
-    bg:      (css.getPropertyValue("--bg-chart")    || "#FFF6E5").trim(),
-    text:    (css.getPropertyValue("--text")        || "#1a2332").trim(),
-    grid:    (css.getPropertyValue("--line-soft")   || "rgba(140,192,235,0.28)").trim(),
-    border:  (css.getPropertyValue("--line")        || "#BFDDF0").trim(),
-    win:     (css.getPropertyValue("--win")         || "#0d8a6e").trim(),
-    loss:    (css.getPropertyValue("--loss")        || "#b8423a").trim(),
-    accent:  (css.getPropertyValue("--accent-strong") || "#5FA3D6").trim(),
+    bg:      (css.getPropertyValue("--bg-chart")      || "#FBF7EE").trim(),
+    text:    (css.getPropertyValue("--ink")           || "#1B1A17").trim(),
+    grid:    (css.getPropertyValue("--hairline-soft") || "rgba(226,217,196,0.55)").trim(),
+    border:  (css.getPropertyValue("--hairline")      || "#E2D9C4").trim(),
+    win:     (css.getPropertyValue("--win")           || "#2F6F4E").trim(),
+    loss:    (css.getPropertyValue("--loss")          || "#B8423A").trim(),
+    accent:  (css.getPropertyValue("--accent")        || "#C84E2C").trim(),
   };
 
   // ----------------------------------------------------------------- helpers
@@ -135,8 +135,8 @@
     });
     equitySeries = equityChart.addAreaSeries({
       lineColor: theme.accent,
-      topColor: "rgba(95, 163, 214, 0.30)",
-      bottomColor: "rgba(95, 163, 214, 0.02)",
+      topColor: "rgba(200, 78, 44, 0.22)",
+      bottomColor: "rgba(200, 78, 44, 0.02)",
       lineWidth: 2,
     });
   }
@@ -389,7 +389,9 @@
   }
 
   document.addEventListener("DOMContentLoaded", async () => {
-    setText("refresh-secs", String(REFRESH_MS / 1000));
+    const secs = String(REFRESH_MS / 1000);
+    setText("refresh-secs", secs);
+    setText("refresh-secs-foot", secs);
     await initSymbolPicker();
     loadCandlesFull();
     tick();

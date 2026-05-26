@@ -1,3 +1,3 @@
-"""Robot Trading bot package."""
+"""Axiom Omega bot package."""
 
 __version__ = "0.1.0"

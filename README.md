@@ -1,4 +1,4 @@
-# Robot Trading
+# Axiom Omega
 
 Automated XAUUSD / forex trading bot for MetaTrader 5. Pulls OHLCV in real time,
 generates EMA + RSI + ATR signals, filters them with a self-improving ML model,

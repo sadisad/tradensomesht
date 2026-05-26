@@ -193,7 +193,7 @@ def main() -> int:
         # Verify the static index loads
         with urllib.request.urlopen("http://127.0.0.1:8766/", timeout=5) as r:
             html = r.read().decode("utf-8")
-        assert "Robot Trading" in html, "index.html not served"
+        assert "Axiom Omega" in html, "index.html not served"
         print(f"[OK] / served {len(html)} bytes of HTML")
 
         server.should_exit = True

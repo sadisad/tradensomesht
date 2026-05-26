@@ -3,85 +3,147 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Robot Trading Dashboard</title>
+  <title>Axiom Omega - Dashboard</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/static/styles.css" />
   <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">
-      <span class="dot" id="conn-dot"></span>
-      <h1>Robot Trading</h1>
-      <select id="symbol-select" class="symbol-select" aria-label="Symbol"></select>
-      <span id="status-line" class="muted"></span>
-    </div>
-    <div class="kpis">
-      <div class="kpi"><label>Equity</label><span id="kpi-equity">--</span></div>
-      <div class="kpi"><label>Balance</label><span id="kpi-balance">--</span></div>
-      <div class="kpi"><label>Last price</label><span id="kpi-price">--</span></div>
-      <div class="kpi mode"><label>Mode</label><span id="kpi-mode">--</span></div>
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="dot" id="conn-dot" aria-hidden="true"></span>
+        <h1 class="wordmark">Axiom<em>Omega</em></h1>
+      </div>
+
+      <div class="topbar-meta">
+        <div class="control">
+          <span class="control-label">Pair</span>
+          <select id="symbol-select" class="symbol-select" aria-label="Symbol"></select>
+        </div>
+        <span id="status-line" class="status-line"></span>
+      </div>
+
+      <div class="kpis">
+        <div class="kpi"><label>Equity</label><span id="kpi-equity">--</span></div>
+        <div class="kpi"><label>Balance</label><span id="kpi-balance">--</span></div>
+        <div class="kpi"><label>Last price</label><span id="kpi-price">--</span></div>
+        <div class="kpi mode"><label>Mode</label><span id="kpi-mode">--</span></div>
+      </div>
     </div>
   </header>
 
-  <section class="stats-row">
-    <div class="card stat"><label>Closed trades</label><strong id="s-closed">0</strong></div>
-    <div class="card stat"><label>Win rate</label><strong id="s-wr">--</strong></div>
-    <div class="card stat"><label>Total PnL</label><strong id="s-pnl">--</strong></div>
-    <div class="card stat"><label>24h PnL</label><strong id="s-pnl24">--</strong></div>
-    <div class="card stat"><label>Signals (acted/total)</label><strong id="s-sig">--</strong></div>
-    <div class="card stat"><label>Last loss</label><strong id="s-lastloss">--</strong></div>
-  </section>
+  <main class="page">
+    <section class="hero">
+      <p class="eyebrow">Live performance</p>
+      <h2 class="display">A calmer view of your <em>trading day</em>.</h2>
+      <p class="lede">Signals, fills, and PnL in one place &mdash; refreshed every <span id="refresh-secs">5</span>s.</p>
+    </section>
 
-  <main>
+    <section class="stats-row">
+      <article class="stat">
+        <label>Closed trades</label>
+        <strong id="s-closed">0</strong>
+      </article>
+      <article class="stat">
+        <label>Win rate</label>
+        <strong id="s-wr">--</strong>
+      </article>
+      <article class="stat">
+        <label>Total PnL</label>
+        <strong id="s-pnl">--</strong>
+      </article>
+      <article class="stat">
+        <label>24h PnL</label>
+        <strong id="s-pnl24">--</strong>
+      </article>
+      <article class="stat">
+        <label>Signals (acted/total)</label>
+        <strong id="s-sig">--</strong>
+      </article>
+      <article class="stat">
+        <label>Last loss</label>
+        <strong id="s-lastloss">--</strong>
+      </article>
+    </section>
+
     <section class="card chart-card">
-      <div class="card-header">
-        <h2 id="chart-title">Chart</h2>
+      <header class="card-header">
+        <div>
+          <p class="kicker">Market</p>
+          <h3 id="chart-title">Chart</h3>
+        </div>
         <div class="muted" id="chart-sub"></div>
-      </div>
+      </header>
       <div id="chart"></div>
     </section>
 
     <section class="card chart-card">
-      <div class="card-header">
-        <h2>Equity curve (cumulative PnL)</h2>
+      <header class="card-header">
+        <div>
+          <p class="kicker">Performance</p>
+          <h3>Equity curve</h3>
+        </div>
         <div class="muted" id="equity-sub"></div>
-      </div>
+      </header>
       <div id="equity-chart"></div>
     </section>
 
     <section class="grid">
-      <div class="card">
-        <div class="card-header"><h2>Open positions</h2></div>
-        <table id="positions-table">
-          <thead><tr><th>Ticket</th><th>Side</th><th>Vol</th><th>Entry</th><th>SL</th><th>TP</th><th>PnL</th></tr></thead>
-          <tbody></tbody>
-        </table>
-        <div id="positions-empty" class="muted">No open positions</div>
-      </div>
+      <article class="card">
+        <header class="card-header">
+          <div>
+            <p class="kicker">Live</p>
+            <h3>Open positions</h3>
+          </div>
+        </header>
+        <div class="table-wrap">
+          <table id="positions-table">
+            <thead><tr><th>Ticket</th><th>Side</th><th>Vol</th><th>Entry</th><th>SL</th><th>TP</th><th>PnL</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div id="positions-empty" class="empty">No open positions</div>
+      </article>
 
-      <div class="card">
-        <div class="card-header"><h2>Recent signals</h2></div>
-        <table id="signals-table">
-          <thead><tr><th>Time</th><th>Side</th><th>Reason</th><th>Proba</th><th>Status</th></tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
+      <article class="card">
+        <header class="card-header">
+          <div>
+            <p class="kicker">Stream</p>
+            <h3>Recent signals</h3>
+          </div>
+        </header>
+        <div class="table-wrap">
+          <table id="signals-table">
+            <thead><tr><th>Time</th><th>Side</th><th>Reason</th><th>Proba</th><th>Status</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </article>
 
-      <div class="card span-2">
-        <div class="card-header"><h2>Recent trades</h2></div>
-        <table id="trades-table">
-          <thead><tr><th>Closed</th><th>Side</th><th>Vol</th><th>Entry</th><th>Exit</th><th>Reason</th><th>PnL</th><th>W/L</th></tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
+      <article class="card span-2">
+        <header class="card-header">
+          <div>
+            <p class="kicker">Journal</p>
+            <h3>Recent trades</h3>
+          </div>
+        </header>
+        <div class="table-wrap">
+          <table id="trades-table">
+            <thead><tr><th>Closed</th><th>Side</th><th>Vol</th><th>Entry</th><th>Exit</th><th>Reason</th><th>PnL</th><th>W/L</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </article>
     </section>
   </main>
 
-  <footer class="muted">
-    Auto-refresh every <span id="refresh-secs">5</span>s. Last update: <span id="last-update">--</span>
+  <footer class="page-footer">
+    <span>Auto-refresh every <span id="refresh-secs-foot">5</span>s</span>
+    <span class="dot-sep">&middot;</span>
+    <span>Last update: <span id="last-update">--</span></span>
   </footer>
 
   <script src="/static/app.js"></script>

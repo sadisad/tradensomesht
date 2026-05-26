@@ -74,7 +74,7 @@ def cmd_stats(cfg, symbol: Optional[str] = None) -> int:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Robot Trading utilities")
+    parser = argparse.ArgumentParser(description="Axiom Omega utilities")
     parser.add_argument("--config", default=None, help="Path to config.yaml")
     parser.add_argument(
         "--symbol",

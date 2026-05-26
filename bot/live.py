@@ -667,7 +667,7 @@ def _install_signal_handlers(bot: LiveBot) -> None:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Robot Trading live loop")
+    parser = argparse.ArgumentParser(description="Axiom Omega live loop")
     parser.add_argument("--config", default=None, help="Path to config.yaml")
     args = parser.parse_args(argv)
 
