@@ -174,6 +174,307 @@ _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
 
 
+# ---------------------------------------------------------------------- calendar
+# Economic calendar via ForexFactory's free JSON feed. Used to drive a
+# "trade-the-news" workflow per the WelcomeHomeTrading methodology:
+#
+#   1. Fundamental = WHY  --> show upcoming high-impact events for the active
+#      pair so the trader knows *which* releases matter.
+#   2. Plan if-then BEFORE the release --> compute a beat / miss bias from
+#      forecast vs previous so the trader has a pre-baked scenario.
+#   3. Avoid mixed data  --> when two same-currency releases land in the same
+#      window with conflicting outcomes (one beat, one miss), surface a
+#      "MIXED -- avoid" flag so the bot/operator stands aside.
+#   4. Intervention risk --> hard-coded warnings for JPY when USDJPY trades in
+#      historically intervention-prone zones (155+, 160+).
+
+_FF_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+
+# Map a trading pair to the currencies whose calendar events matter most.
+_PAIR_CCYS: Dict[str, List[str]] = {
+    "EURUSD": ["EUR", "USD"],
+    "GBPUSD": ["GBP", "USD"],
+    "USDJPY": ["USD", "JPY"],
+    "USDCAD": ["USD", "CAD"],
+    "USDCHF": ["USD", "CHF"],
+    "AUDUSD": ["AUD", "USD"],
+    "NZDUSD": ["NZD", "USD"],
+    "EURJPY": ["EUR", "JPY"],
+    "GBPJPY": ["GBP", "JPY"],
+    "AUDJPY": ["AUD", "JPY"],
+    "EURGBP": ["EUR", "GBP"],
+    "XAUUSD": ["USD"],   # gold reacts mostly to USD-side data
+    "XAGUSD": ["USD"],
+}
+
+# Releases where "higher number = stronger currency". For most metrics this is
+# the default; exceptions (e.g. unemployment rate, jobless claims, CPI for
+# bonds) are listed below so we can flip the bias correctly.
+_LOWER_IS_HAWKISH = (
+    "unemployment rate",
+    "unemployment claims",
+    "jobless claims",
+    "trade balance",   # negative balance widens => bearish
+)
+# Higher inflation = hawkish for the currency (rate-hike pressure).
+# Higher GDP, retail sales, PMI, employment = hawkish.
+# We intentionally don't try to second-guess every release; the classifier
+# falls back to "neutral" when it doesn't know.
+_HAWKISH_HINTS = (
+    "cpi", "ppi", "inflation",
+    "gdp", "retail sales", "pmi", "ism",
+    "employment change", "non-farm", "nfp", "payroll",
+    "average hourly earnings", "wages",
+    "core",
+    "manufacturing production", "industrial production",
+    "consumer confidence", "consumer sentiment",
+    "interest rate", "rate decision", "policy rate",
+)
+
+
+class _CalendarCache:
+    """5-minute cached fetch of the weekly calendar."""
+
+    def __init__(self, ttl_seconds: int = 300) -> None:
+        self.ttl = ttl_seconds
+        self._lock = threading.Lock()
+        self._events: List[Dict[str, Any]] = []
+        self._fetched_at: float = 0.0
+        self._error: Optional[str] = None
+
+    def get(self, force: bool = False) -> Dict[str, Any]:
+        now = _time.time()
+        with self._lock:
+            stale = (now - self._fetched_at) > self.ttl
+            if not force and not stale and self._events:
+                return self._snapshot()
+        events, err = _fetch_calendar()
+        with self._lock:
+            if events:
+                self._events = events
+                self._fetched_at = now
+                self._error = None
+            else:
+                self._error = err
+                if not self._events:
+                    self._fetched_at = now
+            return self._snapshot()
+
+    def _snapshot(self) -> Dict[str, Any]:
+        return {
+            "events": list(self._events),
+            "fetched_at": datetime.fromtimestamp(self._fetched_at, tz=timezone.utc).isoformat()
+                          if self._fetched_at else None,
+            "ttl_seconds": self.ttl,
+            "error": self._error,
+        }
+
+
+_CALENDAR_CACHE = _CalendarCache(ttl_seconds=300)
+
+
+def _parse_ff_number(raw: Optional[str]) -> Optional[float]:
+    """ForexFactory expresses numbers as strings with units (e.g. '3.2%',
+    '250K', '-1.5B'). We strip the formatting so we can compare them."""
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s or s in ("-", "--"):
+        return None
+    s = s.replace(",", "")
+    mult = 1.0
+    if s.endswith("%"):
+        s = s[:-1]
+    if s.endswith("K") or s.endswith("k"):
+        mult, s = 1_000.0, s[:-1]
+    elif s.endswith("M") or s.endswith("m"):
+        mult, s = 1_000_000.0, s[:-1]
+    elif s.endswith("B") or s.endswith("b"):
+        mult, s = 1_000_000_000.0, s[:-1]
+    elif s.endswith("T") or s.endswith("t"):
+        mult, s = 1_000_000_000_000.0, s[:-1]
+    try:
+        return float(s) * mult
+    except ValueError:
+        return None
+
+
+def _direction_for(title: str) -> int:
+    """Return +1 if higher value is hawkish for the currency, -1 if lower is."""
+    lower = title.lower()
+    if any(k in lower for k in _LOWER_IS_HAWKISH):
+        return -1
+    return 1
+
+
+def _classify_outcome(title: str, forecast: Optional[float],
+                      previous: Optional[float], actual: Optional[float]) -> Dict[str, Any]:
+    """Compare actual to forecast (or previous, if forecast is missing) and
+    label the surprise as beat / miss / inline / pending."""
+    out: Dict[str, Any] = {
+        "outcome": "pending",          # pending | beat | miss | inline
+        "bias": "neutral",             # neutral | hawkish | dovish
+        "delta_pct": None,
+    }
+    if actual is None:
+        # Pre-release: lean on forecast vs previous as a *expectation* hint.
+        if forecast is not None and previous is not None:
+            direction = _direction_for(title)
+            diff = forecast - previous
+            if abs(diff) < 1e-9:
+                out["bias"] = "neutral"
+            else:
+                out["bias"] = "hawkish" if (diff * direction > 0) else "dovish"
+            try:
+                out["delta_pct"] = (diff / abs(previous)) * 100.0 if previous else None
+            except ZeroDivisionError:
+                out["delta_pct"] = None
+        return out
+
+    ref = forecast if forecast is not None else previous
+    if ref is None:
+        out["outcome"] = "inline"
+        return out
+
+    direction = _direction_for(title)
+    diff = actual - ref
+    # Build a small tolerance band so a 0.01 wiggle isn't called a "beat".
+    band = max(abs(ref) * 0.005, 0.05)
+    if abs(diff) <= band:
+        out["outcome"] = "inline"
+        out["bias"] = "neutral"
+    else:
+        if diff > 0:
+            out["outcome"] = "beat" if direction > 0 else "miss"
+        else:
+            out["outcome"] = "miss" if direction > 0 else "beat"
+        out["bias"] = "hawkish" if out["outcome"] == "beat" else "dovish"
+    try:
+        out["delta_pct"] = (diff / abs(ref)) * 100.0 if ref else None
+    except ZeroDivisionError:
+        out["delta_pct"] = None
+    return out
+
+
+def _enrich_event(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Translate one ForexFactory record into our canonical event shape."""
+    try:
+        when = datetime.fromisoformat(raw["date"]).astimezone(timezone.utc)
+    except (KeyError, ValueError, TypeError):
+        return None
+    title = (raw.get("title") or "").strip()
+    if not title:
+        return None
+    impact = (raw.get("impact") or "").strip()
+    if impact in ("Holiday", "Non-Economic"):
+        return None
+    fc = _parse_ff_number(raw.get("forecast"))
+    prev = _parse_ff_number(raw.get("previous"))
+    act = _parse_ff_number(raw.get("actual"))
+    cls = _classify_outcome(title, fc, prev, act)
+    return {
+        "time": when.isoformat(),
+        "ts": when.timestamp(),
+        "currency": (raw.get("country") or "").strip(),
+        "title": title,
+        "impact": impact,
+        "forecast": raw.get("forecast") or None,
+        "previous": raw.get("previous") or None,
+        "actual": raw.get("actual") or None,
+        "forecast_num": fc,
+        "previous_num": prev,
+        "actual_num": act,
+        "outcome": cls["outcome"],
+        "bias": cls["bias"],
+        "delta_pct": cls["delta_pct"],
+    }
+
+
+def _fetch_calendar() -> tuple[List[Dict[str, Any]], Optional[str]]:
+    req = urllib.request.Request(
+        _FF_CALENDAR_URL,
+        headers={
+            "User-Agent": "AxiomOmega/1.0 (+dashboard calendar widget)",
+            "Accept": "application/json,*/*;q=0.1",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = r.read()
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        log.warning("calendar fetch failed: %s", e)
+        return [], str(e)
+    try:
+        raw = json.loads(data.decode("utf-8", errors="replace"))
+    except (ValueError, UnicodeDecodeError) as e:
+        return [], str(e)
+    events: List[Dict[str, Any]] = []
+    for r in raw or []:
+        e = _enrich_event(r)
+        if e is not None:
+            events.append(e)
+    events.sort(key=lambda e: e["ts"])
+    return events, None
+
+
+def _detect_mixed(events: List[Dict[str, Any]], window_minutes: int = 30) -> List[Dict[str, Any]]:
+    """Mark events as `mixed=True` when another same-currency, same-window
+    release fired with the opposite outcome. Implements the video's
+    'avoid mixed data' rule."""
+    by_ccy: Dict[str, List[Dict[str, Any]]] = {}
+    for e in events:
+        by_ccy.setdefault(e["currency"], []).append(e)
+    win = window_minutes * 60.0
+    for grp in by_ccy.values():
+        for i, e in enumerate(grp):
+            if e["outcome"] == "pending":
+                continue
+            for j, other in enumerate(grp):
+                if i == j or other["outcome"] == "pending":
+                    continue
+                if abs(other["ts"] - e["ts"]) > win:
+                    continue
+                if {e["outcome"], other["outcome"]} == {"beat", "miss"}:
+                    e["mixed"] = True
+                    e.setdefault("mixed_with", []).append({
+                        "title": other["title"],
+                        "outcome": other["outcome"],
+                        "time": other["time"],
+                    })
+                    break
+            else:
+                e["mixed"] = e.get("mixed", False)
+    return events
+
+
+def _intervention_warnings(symbol: str, last_price: Optional[float]) -> List[Dict[str, Any]]:
+    """Hard-coded BoJ-style intervention zones. The video flags this as the
+    main reason to *skip* a setup even when the fundamental thesis is right."""
+    warnings: List[Dict[str, Any]] = []
+    sym = (symbol or "").upper()
+    if sym.startswith("USDJPY") and last_price is not None:
+        if last_price >= 160.0:
+            warnings.append({
+                "level": "high",
+                "message": "USDJPY above 160 -- BoJ intervention historically likely. "
+                           "Consider standing aside or trading smaller size.",
+            })
+        elif last_price >= 155.0:
+            warnings.append({
+                "level": "medium",
+                "message": "USDJPY above 155 -- BoJ verbal intervention zone. "
+                           "Watch for sudden reversals.",
+            })
+    if sym.endswith("JPY") and not sym.startswith("USDJPY") and last_price is not None:
+        # Cross-yen pairs also see spillover from BoJ moves
+        warnings.append({
+            "level": "info",
+            "message": f"{sym} is a JPY cross -- BoJ action on USDJPY can whip "
+                       "this pair regardless of your fundamental thesis.",
+        })
+    return warnings
+
+
 class _NewsCache:
     """Thread-safe in-memory cache for the merged news feed.
 
@@ -693,6 +994,89 @@ def create_app(cfg: Dict[str, Any]) -> FastAPI:
             "total": len(items),
             "fetched_at": snap["fetched_at"],
             "ttl_seconds": snap["ttl_seconds"],
+            "error": snap["error"],
+        }
+
+    @app.get("/api/calendar")
+    def api_calendar(
+        symbol: Optional[str] = None,
+        impact: str = Query("High,Medium", description="Comma-separated impact filter"),
+        upcoming_hours: int = Query(72, ge=1, le=336),
+        recent_hours: int = Query(6, ge=0, le=48),
+        refresh: bool = Query(False),
+    ):
+        """Economic calendar relevant to the active trading pair.
+
+        Drives the WelcomeHomeTrading-style 'trade-the-news' workflow:
+        upcoming releases for if-then planning, recent releases with
+        beat/miss/inline outcomes, mixed-data warnings, and a per-currency
+        bias summary."""
+        snap = _CALENDAR_CACHE.get(force=refresh)
+        all_events = snap["events"]
+        # Window: keep recent results visible briefly so the trader can read
+        # the surprise that just printed.
+        now_ts = _time.time()
+        win_low = now_ts - recent_hours * 3600
+        win_high = now_ts + upcoming_hours * 3600
+        events = [e for e in all_events if win_low <= e["ts"] <= win_high]
+        # Impact filter
+        wanted_impacts = {i.strip() for i in impact.split(",") if i.strip()}
+        if wanted_impacts:
+            events = [e for e in events if e["impact"] in wanted_impacts]
+        # Pair relevance
+        sym = _resolve_symbol(symbol, cfg["trading"]["symbol"])
+        ccys = _PAIR_CCYS.get(sym.upper(), [])
+        if ccys:
+            events = [e for e in events if e["currency"] in ccys]
+        # Tag mixed-data conflicts (uses *all* same-currency results, not just
+        # the filtered slice, so a mixed pair across impact tiers still flags)
+        _detect_mixed(events)
+
+        # Per-currency net bias from completed surprises
+        bias_by_ccy: Dict[str, Dict[str, int]] = {}
+        for e in events:
+            if e["outcome"] in ("beat", "miss"):
+                b = bias_by_ccy.setdefault(e["currency"], {"hawkish": 0, "dovish": 0, "mixed": 0})
+                if e.get("mixed"):
+                    b["mixed"] += 1
+                elif e["bias"] == "hawkish":
+                    b["hawkish"] += 1
+                elif e["bias"] == "dovish":
+                    b["dovish"] += 1
+
+        # Live price for intervention warning
+        last_price = None
+        try:
+            client = _try_mt5()
+            if client is not None:
+                import MetaTrader5 as mt5  # type: ignore
+                tick = mt5.symbol_info_tick(sym)
+                if tick is not None:
+                    last_price = float((tick.ask + tick.bid) / 2.0)
+        except Exception:  # noqa: BLE001
+            last_price = None
+
+        warnings = _intervention_warnings(sym, last_price)
+
+        # Find the next high-impact release for the active pair (drives the
+        # 'plan if-then before the release' panel).
+        next_high = None
+        for e in events:
+            if e["ts"] >= now_ts and e["impact"] == "High":
+                next_high = e
+                break
+
+        return {
+            "symbol": sym,
+            "currencies": ccys,
+            "events": events,
+            "next_high": next_high,
+            "bias": bias_by_ccy,
+            "warnings": warnings,
+            "last_price": last_price,
+            "fetched_at": snap["fetched_at"],
+            "ttl_seconds": snap["ttl_seconds"],
+            "now_utc": datetime.now(tz=timezone.utc).isoformat(),
             "error": snap["error"],
         }
 

@@ -33,6 +33,14 @@
         <div class="kpi mode"><label>Mode</label><span id="kpi-mode">--</span></div>
       </div>
     </div>
+    <div id="news-banner" class="news-banner" hidden>
+      <div class="news-banner-inner">
+        <span class="news-banner-tag">High-impact news</span>
+        <span id="news-banner-title">--</span>
+        <span class="news-banner-spacer"></span>
+        <span id="news-banner-countdown" class="news-banner-countdown">--</span>
+      </div>
+    </div>
   </header>
 
   <main class="page">
@@ -66,6 +74,34 @@
       <article class="stat">
         <label>Last loss</label>
         <strong id="s-lastloss">--</strong>
+      </article>
+    </section>
+
+    <section class="grid plan-grid">
+      <article class="card plan-card" id="plan-card">
+        <header class="card-header">
+          <div>
+            <p class="kicker">Trade plan</p>
+            <h3>Next high-impact release</h3>
+          </div>
+          <span class="muted" id="plan-sub">--</span>
+        </header>
+        <div class="plan-body" id="plan-body">
+          <p class="empty">Waiting for the next high-impact event&hellip;</p>
+        </div>
+      </article>
+
+      <article class="card bias-card">
+        <header class="card-header">
+          <div>
+            <p class="kicker">Currency bias</p>
+            <h3>This week so far</h3>
+          </div>
+          <span class="muted" id="bias-sub">From completed releases</span>
+        </header>
+        <div class="bias-body" id="bias-body">
+          <p class="empty">No surprises printed yet&hellip;</p>
+        </div>
       </article>
     </section>
 
@@ -137,6 +173,25 @@
           </table>
         </div>
       </article>
+    </section>
+
+    <section class="card calendar-card">
+      <header class="card-header">
+        <div>
+          <p class="kicker">Calendar</p>
+          <h3>Economic releases for <span id="calendar-pair">--</span></h3>
+        </div>
+        <div class="calendar-controls">
+          <div class="seg" role="tablist" aria-label="Impact filter">
+            <button type="button" class="seg-btn is-active" data-impact="High,Medium">High &amp; Medium</button>
+            <button type="button" class="seg-btn" data-impact="High">High only</button>
+          </div>
+          <span class="muted" id="calendar-sub"></span>
+        </div>
+      </header>
+      <div id="calendar-warnings" class="calendar-warnings" hidden></div>
+      <ol id="calendar-list" class="calendar-list"></ol>
+      <div id="calendar-empty" class="empty" hidden>No upcoming releases for this pair&hellip;</div>
     </section>
 
     <section class="card news-card">

@@ -5,6 +5,8 @@
   const REFRESH_MS = 5000;
   const CHART_REFRESH_MS = 15000;
   const NEWS_REFRESH_MS = 120000;
+  const CALENDAR_REFRESH_MS = 60000;
+  const COUNTDOWN_MS = 1000;
 
   let chart = null;
   let candleSeries = null;
@@ -13,6 +15,9 @@
   let lastCandleTime = 0;
   let lastChartLoad = 0;
   let lastNewsLoad = 0;
+  let lastCalendarLoad = 0;
+  let calendarImpact = "High,Medium";
+  let lastCalendarData = null;
   let newsTag = "";
 
   // Currently-selected symbol. Initialised from localStorage on boot, then
@@ -380,6 +385,273 @@
     });
   }
 
+  // ----------------------------------------------------------------- calendar
+  // Implements the WelcomeHomeTrading 'trade-the-news' workflow:
+  //  - Plan if-then BEFORE release: countdown + scenarios for the next high event
+  //  - Fundamental = WHY: per-currency bias from completed surprises this week
+  //  - Avoid mixed data: explicit MIXED pill and warning
+  //  - Intervention risk: server-side warnings rendered above the calendar list
+
+  function fmtCountdown(ms) {
+    if (ms == null || isNaN(ms)) return "--";
+    const past = ms < 0;
+    const abs = Math.abs(ms);
+    const totalSec = Math.floor(abs / 1000);
+    const d = Math.floor(totalSec / 86400);
+    const h = Math.floor((totalSec % 86400) / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    const s = totalSec % 60;
+    let out;
+    if (d > 0) out = `${d}d ${h}h ${String(m).padStart(2, "0")}m`;
+    else if (h > 0) out = `${h}h ${String(m).padStart(2, "0")}m`;
+    else out = `${m}m ${String(s).padStart(2, "0")}s`;
+    return past ? `${out} ago` : `in ${out}`;
+  }
+
+  function fmtClock(iso) {
+    if (!iso) return "--";
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "--";
+    const day = d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+    const hh = String(d.getUTCHours()).padStart(2, "0");
+    const mm = String(d.getUTCMinutes()).padStart(2, "0");
+    return `${day} ${hh}:${mm}Z`;
+  }
+
+  function impactBadge(impact) {
+    const cls = (impact || "").toLowerCase();
+    return `<span class="impact impact-${cls}">${impact || "--"}</span>`;
+  }
+
+  function outcomePill(e) {
+    if (e.mixed) return `<span class="pill mixed" title="Mixed data on the same currency">MIXED</span>`;
+    if (e.outcome === "beat")   return `<span class="pill beat">BEAT</span>`;
+    if (e.outcome === "miss")   return `<span class="pill miss">MISS</span>`;
+    if (e.outcome === "inline") return `<span class="pill inline">INLINE</span>`;
+    if (e.bias === "hawkish")   return `<span class="pill expect-hawk">expect hawkish</span>`;
+    if (e.bias === "dovish")    return `<span class="pill expect-dove">expect dovish</span>`;
+    return `<span class="pill pending">pending</span>`;
+  }
+
+  function renderPlan(data) {
+    const body = document.getElementById("plan-body");
+    const sub = document.getElementById("plan-sub");
+    if (!body) return;
+    const e = data && data.next_high;
+    if (!e) {
+      body.innerHTML = `<p class="empty">No high-impact release in the next 72h&hellip;</p>`;
+      if (sub) sub.textContent = data && data.symbol ? `for ${data.symbol}` : "--";
+      return;
+    }
+    const ms = (e.ts * 1000) - Date.now();
+    const direction = _direction(e.title);
+    const ccy = e.currency;
+    const fc = e.forecast || "--";
+    const prev = e.previous || "--";
+    const lean = e.bias === "hawkish"
+      ? `Forecast leans <span class="hawk">hawkish</span> for ${ccy}`
+      : e.bias === "dovish"
+        ? `Forecast leans <span class="dove">dovish</span> for ${ccy}`
+        : `Forecast roughly in line with previous`;
+    const arrowUp = direction > 0 ? "above forecast" : "below forecast";
+    const arrowDown = direction > 0 ? "below forecast" : "above forecast";
+    body.innerHTML = `
+      <div class="plan-headline">
+        <span class="plan-ccy">${ccy}</span>
+        <span class="plan-title">${escapeHTML(e.title)}</span>
+        ${impactBadge(e.impact)}
+      </div>
+      <div class="plan-meta">
+        <span class="plan-when" data-plan-ts="${e.ts}">${fmtCountdown(ms)}</span>
+        <span class="muted">${fmtClock(e.time)}</span>
+        <span class="muted">forecast ${escapeHTML(fc)} | previous ${escapeHTML(prev)}</span>
+      </div>
+      <p class="plan-lean">${lean}.</p>
+      <div class="plan-scenarios">
+        <div class="plan-scen scen-up">
+          <span class="scen-tag">If actual ${arrowUp}</span>
+          <p>${ccy} likely <strong>strengthens</strong>. Look for break-of-structure
+             continuation in the direction that favors ${ccy}.</p>
+        </div>
+        <div class="plan-scen scen-down">
+          <span class="scen-tag">If actual ${arrowDown}</span>
+          <p>${ccy} likely <strong>weakens</strong>. Look for break-of-structure in
+             the direction that fades ${ccy}.</p>
+        </div>
+        <div class="plan-scen scen-mixed">
+          <span class="scen-tag">If mixed / inline</span>
+          <p><strong>Stand aside.</strong> Reaction will be choppy and your
+             fundamental edge disappears.</p>
+        </div>
+      </div>
+    `;
+    if (sub) sub.textContent = `for ${data.symbol} | ${ccy}`;
+  }
+
+  function _direction(title) {
+    // Mirrors backend _direction_for: lower-is-hawkish for these titles.
+    const t = String(title || "").toLowerCase();
+    const inverted = ["unemployment rate", "unemployment claims",
+                      "jobless claims", "trade balance"];
+    return inverted.some((k) => t.includes(k)) ? -1 : 1;
+  }
+
+  function renderBias(data) {
+    const body = document.getElementById("bias-body");
+    if (!body) return;
+    const bias = (data && data.bias) || {};
+    const ccys = (data && data.currencies) || Object.keys(bias);
+    const rows = ccys
+      .filter((c) => bias[c])
+      .map((c) => {
+        const b = bias[c];
+        const net = (b.hawkish || 0) - (b.dovish || 0);
+        const cls = net > 0 ? "hawk" : net < 0 ? "dove" : "neutral";
+        const label = net > 0 ? "Hawkish" : net < 0 ? "Dovish" : "Neutral";
+        const mixed = b.mixed ? `<span class="bias-mixed">${b.mixed} mixed</span>` : "";
+        return `
+          <li class="bias-row">
+            <span class="bias-ccy">${c}</span>
+            <span class="bias-tag ${cls}">${label}</span>
+            <span class="muted">${b.hawkish || 0} beats / ${b.dovish || 0} misses</span>
+            ${mixed}
+          </li>`;
+      });
+    if (!rows.length) {
+      body.innerHTML = `<p class="empty">No surprises printed yet for this pair&hellip;</p>`;
+      return;
+    }
+    body.innerHTML = `<ul class="bias-list">${rows.join("")}</ul>`;
+  }
+
+  function renderCalendar(data) {
+    const list = document.getElementById("calendar-list");
+    const empty = document.getElementById("calendar-empty");
+    const sub = document.getElementById("calendar-sub");
+    const pair = document.getElementById("calendar-pair");
+    const warnBox = document.getElementById("calendar-warnings");
+    if (!list) return;
+    if (pair) pair.textContent = data.symbol || "--";
+
+    // Warnings (intervention zones, etc.)
+    if (warnBox) {
+      const ws = data.warnings || [];
+      if (ws.length) {
+        warnBox.hidden = false;
+        warnBox.innerHTML = ws.map((w) =>
+          `<div class="warn warn-${w.level}">${escapeHTML(w.message)}</div>`
+        ).join("");
+      } else {
+        warnBox.hidden = true;
+        warnBox.innerHTML = "";
+      }
+    }
+
+    list.innerHTML = "";
+    const events = data.events || [];
+    if (!events.length) {
+      empty.hidden = false;
+      if (sub) sub.textContent = data.error ? `error: ${data.error}` : "";
+      return;
+    }
+    empty.hidden = true;
+    const now = Date.now();
+    events.forEach((e) => {
+      const ms = (e.ts * 1000) - now;
+      const past = ms < 0;
+      const li = document.createElement("li");
+      li.className = `cal-event ${past ? "is-past" : "is-upcoming"} ${e.mixed ? "is-mixed" : ""}`;
+      li.innerHTML = `
+        <div class="cal-time">
+          <span class="cal-clock">${fmtClock(e.time)}</span>
+          <span class="cal-countdown" data-plan-ts="${e.ts}">${fmtCountdown(ms)}</span>
+        </div>
+        <div class="cal-meta">
+          <span class="cal-ccy">${e.currency}</span>
+          ${impactBadge(e.impact)}
+        </div>
+        <div class="cal-title">${escapeHTML(e.title)}</div>
+        <div class="cal-numbers">
+          <span class="muted">fc</span> <strong>${escapeHTML(e.forecast || "--")}</strong>
+          <span class="muted">prev</span> <strong>${escapeHTML(e.previous || "--")}</strong>
+          <span class="muted">act</span> <strong>${escapeHTML(e.actual || "--")}</strong>
+        </div>
+        <div class="cal-outcome">${outcomePill(e)}</div>
+      `;
+      list.appendChild(li);
+    });
+    if (sub) {
+      const fetched = data.fetched_at ? fmtAge(data.fetched_at) : "--";
+      sub.textContent = data.error
+        ? `partial data | updated ${fetched}`
+        : `${events.length} events | updated ${fetched}`;
+    }
+  }
+
+  function renderNewsBanner(data) {
+    const banner = document.getElementById("news-banner");
+    const title = document.getElementById("news-banner-title");
+    const cd = document.getElementById("news-banner-countdown");
+    if (!banner) return;
+    const e = data && data.next_high;
+    if (!e) { banner.hidden = true; return; }
+    const ms = (e.ts * 1000) - Date.now();
+    // Fire window: 30 minutes before -> 5 minutes after the release.
+    if (ms > 30 * 60 * 1000 || ms < -5 * 60 * 1000) {
+      banner.hidden = true;
+      return;
+    }
+    banner.hidden = false;
+    if (title) title.textContent = `${e.currency} - ${e.title}`;
+    if (cd) cd.textContent = fmtCountdown(ms);
+    banner.classList.toggle("is-imminent", ms < 5 * 60 * 1000 && ms > -2 * 60 * 1000);
+  }
+
+  function tickCountdowns() {
+    const now = Date.now();
+    document.querySelectorAll("[data-plan-ts]").forEach((el) => {
+      const ts = Number(el.dataset.planTs);
+      if (!ts) return;
+      el.textContent = fmtCountdown(ts * 1000 - now);
+    });
+    if (lastCalendarData) renderNewsBanner(lastCalendarData);
+  }
+
+  async function refreshCalendar(force) {
+    try {
+      const qs = new URLSearchParams();
+      qs.set("impact", calendarImpact);
+      qs.set("upcoming_hours", "168");
+      qs.set("recent_hours", "12");
+      if (currentSymbol) qs.set("symbol", currentSymbol);
+      if (force) qs.set("refresh", "1");
+      const data = await getJSON(`/api/calendar?${qs.toString()}`);
+      lastCalendarData = data;
+      renderPlan(data);
+      renderBias(data);
+      renderCalendar(data);
+      renderNewsBanner(data);
+      lastCalendarLoad = Date.now();
+    } catch (e) {
+      const sub = document.getElementById("calendar-sub");
+      if (sub) sub.textContent = `calendar error: ${e.message}`;
+    }
+  }
+
+  function initCalendarControls() {
+    const seg = document.querySelectorAll(".seg-btn[data-impact]");
+    if (!seg.length) return;
+    seg.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const imp = btn.dataset.impact || "High,Medium";
+        if (imp === calendarImpact) return;
+        calendarImpact = imp;
+        seg.forEach((b) => b.classList.toggle("is-active", b === btn));
+        refreshCalendar(false);
+      });
+    });
+  }
+
   // ----------------------------------------------------------------- symbol picker
   /** Read ``?symbols=A,B,C`` (or hash equivalent) from the page URL. Lets you
    * pin pairs into the picker that haven't traded yet (useful while waiting for
@@ -434,6 +706,7 @@
         }
         lastCandleTime = 0;
         loadCandlesFull();
+        refreshCalendar(false);
         tick();
       });
       // Re-poll the symbol list periodically so newly-active pairs appear
@@ -483,6 +756,9 @@
       // after the cache expires.
       refreshNews(false);
     }
+    if (Date.now() - lastCalendarLoad > CALENDAR_REFRESH_MS) {
+      refreshCalendar(false);
+    }
     setText("last-update", new Date().toISOString().replace("T", " ").slice(11, 19) + "Z");
   }
 
@@ -491,10 +767,13 @@
     setText("refresh-secs", secs);
     setText("refresh-secs-foot", secs);
     initNewsControls();
+    initCalendarControls();
     await initSymbolPicker();
     loadCandlesFull();
     refreshNews(false);
+    refreshCalendar(false);
     tick();
     setInterval(tick, REFRESH_MS);
+    setInterval(tickCountdowns, COUNTDOWN_MS);
   });
 })();
