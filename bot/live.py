@@ -94,6 +94,9 @@ class LiveBot:
         # partial close fired against them. Mirrors the paper-side flag in
         # ``_paper_positions[ticket]["partial_taken"]`` for demo mode.
         self._partials_taken: Dict[int, bool] = {}
+        # Heartbeat counter so we log a 'no_signal' line every Nth cycle
+        # rather than every cycle (would spam INFO log).
+        self._heartbeat_counter: int = 0
         _safe_symbol = "".join(c if c.isalnum() else "_" for c in self.symbol).lower()
         self._paper_state_path: Path = Path(self.journal_cfg["db_path"]).with_name(
             f"paper_positions_{_safe_symbol}.json"
@@ -170,6 +173,17 @@ class LiveBot:
         # 4. Strategy signal
         sig = self.strategy.evaluate(ind, htf_df=htf_df)
         if sig is None:
+            # Heartbeat: log a one-liner every N cycles so the operator can see
+            # the bot is alive even when no signal triggers. Cheap and quiet.
+            self._heartbeat_counter = (self._heartbeat_counter + 1) % 4
+            if self._heartbeat_counter == 0:
+                last = ind.iloc[-2]
+                log.info(
+                    "heartbeat: %s %s no_signal close=%.5f rsi=%.1f atr=%.5f bar=%s",
+                    self.symbol, self.timeframe,
+                    float(last["close"]), float(last["rsi"]), float(last["atr"]),
+                    last_closed_bar_time,
+                )
             return
 
         # 4. Build features for ML + journal
